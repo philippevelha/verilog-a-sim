@@ -1,0 +1,40 @@
+* Bubble cloud, part 1b: one bubble driven at twice its natural frequency, at ten amplitudes.
+*
+* Ten independent copies of models/multiphysics/bubble/bubble_parts.va's `bubble`, each held by
+* its own `bubble_drive` at p = 1 + g sin(2 t) (omega = 2, the paper's Figs. 9-10), mu = 0.002,
+* nu = 0.015 (a ~100 um bubble in water). Each starts at rest and prints its state once per
+* driving period (t = n pi) over the last 100 periods of 700.
+* Reference: the same equations integrated with scipy (DOP853, rtol 1e-11), sampled at the same
+* times, in docs/examples/multiphysics/bubble_plots.py. The period-1 orbit loses stability at
+* g_c = 0.10201 (its Floquet multiplier crosses -1; computed there too), so from g = 0.15 on the
+* bubble answers at half the driving frequency.
+* Run at --reltol 1e-5. At the default 1e-3 the periodic orbits agree to ~4e-3 but g = 2.5
+*   lands on a different attractor (a long irregular orbit) than scipy does.
+* What to look for (measured at 2.44.0+5, --reltol 1e-5): period 1 at g = 0.05, period 2 from
+*   0.15 to 2.5, period 3 at g = 3.0 and period 6 at 3.5, every count equal to scipy's, and the
+*   values on each final orbit equal to scipy's within 3.8e-4 (compared as sets: at g = 3.5 the
+*   two integrators enter the period-6 orbit at different points of its cycle).
+* Plot and check: python docs/examples/multiphysics/bubble_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/bubble_single.net --model models/multiphysics/bubble --tran --reltol 1e-5 --report p1
+XD1 p1 bubble_drive g=0.05 omega=2 nper=50
+XB1 p1 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+XD2 p2 bubble_drive g=0.15 omega=2 nper=50
+XB2 p2 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+XD3 p3 bubble_drive g=0.3 omega=2 nper=50
+XB3 p3 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+XD4 p4 bubble_drive g=0.5 omega=2 nper=50
+XB4 p4 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+XD5 p5 bubble_drive g=1.0 omega=2 nper=50
+XB5 p5 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+XD6 p6 bubble_drive g=1.5 omega=2 nper=50
+XB6 p6 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+XD7 p7 bubble_drive g=2.0 omega=2 nper=50
+XB7 p7 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+XD8 p8 bubble_drive g=2.5 omega=2 nper=50
+XB8 p8 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+XD9 p9 bubble_drive g=3.0 omega=2 nper=50
+XB9 p9 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+XD10 p10 bubble_drive g=3.5 omega=2 nper=50
+XB10 p10 bubble tpoinc=3.141592653589793 tskip=1884.9555921538758
+.tran 0.1 2199.1148575128552
+.end

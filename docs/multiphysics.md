@@ -21,22 +21,22 @@ Which language features each example uses, so the set as a whole reads as a cove
 
 | Construct | Examples |
 |---|---|
-| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
+| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos), [bubble](#periodically-driven-bubbles-rayleighplesset-period-doubling-and-a-delayed-jump) |
 | several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
 | `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
-| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
-| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
+| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos), [bubble](#periodically-driven-bubbles-rayleighplesset-period-doubling-and-a-delayed-jump) |
+| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos), [bubble](#periodically-driven-bubbles-rayleighplesset-period-doubling-and-a-delayed-jump) |
 | `laplace_nd` | [TEC](#peltier-cooler-under-pid-control) |
 | `transition` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
-| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
-| `@(timer)` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos), [bubble](#periodically-driven-bubbles-rayleighplesset-period-doubling-and-a-delayed-jump) |
+| `@(timer)` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [bubble](#periodically-driven-bubbles-rayleighplesset-period-doubling-and-a-delayed-jump) |
 | `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
-| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
+| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [bubble](#periodically-driven-bubbles-rayleighplesset-period-doubling-and-a-delayed-jump) |
 | `.op`, `.dc` sweep, `.tran` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `ddt` of a nonlinear charge (`d/dt[C(x)V]`) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | a coefficient times `ddt` | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 | event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
-| `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [bubble](#periodically-driven-bubbles-rayleighplesset-period-doubling-and-a-delayed-jump) |
 | `@(above)` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
 | `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
 | `$bound_step` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
@@ -1204,3 +1204,101 @@ The largest Lyapunov exponent of the same equations, computed with the Benettin 
 - Carriers lumped over the mode volume, with a linearised free-carrier index.
 - One thermal node per ring.
 - Light travels one way along the bus.
+
+---
+
+## Periodically driven bubbles: Rayleigh–Plesset, period doubling and a delayed jump
+
+**Domains:** fluid (a gas bubble in a liquid, and the mixture's mean pressure). **Models:**
+`models/multiphysics/bubble/bubble_parts.va` and `bubble_natures.vams`.
+
+The first step towards the bubble cloud of Smereka & Banerjee, "The dynamics of periodically
+driven bubble clouds", Phys. Fluids 31, 3519 (1988) (in `references/`): one bubble, driven by
+the pressure around it. The paper's model is dimensionless (radius y = R/R₀, pressure p = P/P₀,
+time in units of the bubble's natural period /2π). Each bubble obeys a Rayleigh–Plesset equation
+with viscous and acoustic damping (μ = 0.002, ν = 0.015: about a 100 µm bubble in water):
+
+    y y'' + 3/2 y'² = 1/4 (y⁻⁴ − p) − y' (μ/y + ν/y⁴)                     (32b)
+
+The cell is built to be chained into the cloud. Its port is a pressure node. Its flow into that
+node is the paper's eq. (A1), (32a) with y'' eliminated through (32b), so the pressure row has no
+`ddt` in it. A chain of cells joined by conductances 1/Δx² is then the paper's discretised cloud
+(A3). Inside, the radius is held as **ln y**:
+
+- The log keeps the radius positive whatever a Newton iterate does.
+- It puts the bubble at rest where every solve starts. With y itself as the unknown, the first
+  DC iterate is y = 0, where y⁻⁴ is infinite, and the operating point failed with E0603.
+
+`bubble_drive` applies p = 1 + g sin ωt, with g optionally growing for sweeps. The paper writes
+cos ωt; sin makes the operating point the bubble at rest. The cell prints its state once per
+`tpoinc` (`@(timer)`), which gives stroboscopic (Poincaré) samples at exact time points.
+
+```bash
+python docs/examples/multiphysics/bubble_plots.py target/release/va-cli
+```
+
+### 1. Small signal, against the closed form
+
+![Small-signal radius response](examples/multiphysics/bubble_linear.svg)
+
+`bubble_linear.net` holds the pressure at 1 with a unit AC amplitude. Linearising (32b) about
+y = 1 gives the paper's eq. (13b): y₁/p₁ = −¼ / (1 − ω² + i b ω), with b = μ + ν. That is a
+resonance at ω = 1, the cutoff frequency of the cloud to come, with a peak of 1/(4b) = 14.71.
+The simulated response agrees within 4.8·10⁻⁷ relative at all 401 points, which is the
+precision of the printout.
+
+### 2. Period doubling at twice the natural frequency
+
+![Stroboscopic radius against drive amplitude](examples/multiphysics/bubble_bifurcation.svg)
+
+At ω = 2, the paper's Figs. 9–10, the period-1 orbit loses stability at **g_c = 0.10201**: its
+Floquet multiplier crosses −1. The script computes this from the model's own equations, by a
+shooting method on one period.
+
+`bubble_single.net` runs ten bubbles from rest at fixed amplitudes and samples the last 100 of
+700 periods. scipy integrates the same equations (DOP853, rtol 10⁻¹¹) at the same instants.
+
+| g | 0.05 | 0.15 – 2.5 | 3.0 | 3.5 |
+|---|---|---|---|---|
+| period, simulated and scipy | 1 | 2 | 3 | 6 |
+
+The orbit values agree within 3.8·10⁻⁴ at `--reltol 1e-5`.
+
+`bubble_ramp.net` grows g from 0 to 1 over 6366 periods, as the paper does. The jump to
+period 2 does not come at g_c:
+
+| Run | Jump at g |
+|---|---|
+| simulated, `--reltol 1e-3` | 0.2149 |
+| simulated, `--reltol 1e-4` | 0.2198 |
+| simulated, `--reltol 1e-5` | 0.2284 |
+| scipy, rtol 10⁻¹¹ | 0.2695 |
+
+Past the jump, the sweep lies on the fixed-amplitude orbits and on scipy's within 3.5·10⁻⁴.
+
+**What this showed.**
+
+- **A slow sweep delays a period doubling by an amount set by the noise, not by the bubble.**
+  Past g_c the subharmonic grows from whatever perturbation is there. The smaller the seed, the
+  later the jump, and an integrator's error is a seed. The jump moves towards scipy's as the
+  tolerance tightens, and scipy's is later still. A jump point read off a sweep is therefore
+  not a threshold. The paper's g ≈ 0.4 for the edge bubbles (Fig. 9) came from such a sweep:
+  its rate and its integrator's error are not stated, and the edge bubbles of a cloud are not
+  free bubbles. It is not a number to match.
+- **The default tolerance chooses a different attractor at g = 2.5.** At `--reltol 1e-3` the
+  periodic orbits agree with scipy within about 4·10⁻³. At g = 2.5, however, the bubble settles
+  into a long irregular orbit where scipy finds period 2. At 10⁻⁵ both find period 2. Strongly
+  driven runs need the tighter tolerance, and the decks state it.
+- **A netlist source drives a user discipline's node.** `V… p gnd DC 1 AC 1` holds the pressure
+  node directly; the AC deck needs it. va-cli's AC analysis requires a netlist source with an
+  `AC` spec and does not count an `ac_stim` inside a Verilog-A source (E0720).
+
+**Limitations.**
+
+- So far one bubble in an infinite liquid. The cell's pressure flow (A1) is written but not yet
+  exercised: an ideal source absorbs it. The ladder (the cloud's linear response, the paper's
+  Figs. 4–8 and eq. 52) is the next step.
+- The paper's model: a polytropic gas with γ = 4/3, no heat or mass transfer, and liquid
+  compressibility only as Herring's damping term.
+- A sample time is a breakpoint, but the sampled value carries the integrator's error at that
+  point (≤ 3.8·10⁻⁴ here at `--reltol 1e-5`).

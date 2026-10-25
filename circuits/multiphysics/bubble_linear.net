@@ -1,0 +1,19 @@
+* Bubble cloud, part 1a: one bubble's small-signal response (Smereka & Banerjee 1988, eq. 13b).
+*
+* One cell of models/multiphysics/bubble/bubble_parts.va in an infinite liquid: its pressure node
+* is held by an ideal source at p = 1 with a unit AC amplitude. Everything is dimensionless; the
+* AC frequency is in Hz, so the paper's omega = 2 pi f and omega = 1 (the bubble's natural
+* frequency) is f = 0.159155.
+* Closed form, from linearising (32b) about y = 1 (the paper's eq. 13b, b = mu + nu = 0.017):
+*   y_1 / p_1 = -(1/4) / (1 - omega^2 + i b omega),
+* a resonance at omega = 1 with |y_1| = 1/(4 b) = 14.706 and 90 degrees of phase lag behind the
+* -1/4 static compliance. The radius node holds ln y, which to first order is y - 1.
+* What to look for (measured at 2.44.0+5): |Rad(XB.y)| within 4.8e-7 relative of the closed form
+* at all 401 points (the printout carries 7 significant digits); the largest value, 14.495, at
+* f = 0.159375, the grid point nearest 0.159155.
+* Plot and check: python docs/examples/multiphysics/bubble_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/bubble_linear.net --model models/multiphysics/bubble --ac --report XB.y
+VP p gnd DC 1 AC 1
+XB p bubble
+.ac lin 401 0.05 0.3
+.end

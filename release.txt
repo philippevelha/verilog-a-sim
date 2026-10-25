@@ -22,6 +22,31 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.44.0+5 - 2026-10-25
+---------------------
+**Multiphysics example 16, part 1: one periodically driven bubble** (Smereka & Banerjee, Phys.
+Fluids 31, 3519, 1988; `models/multiphysics/bubble/`, decks `circuits/multiphysics/bubble_*.net`,
+`bubble_plots.py`, `docs/multiphysics.md`). The first step towards the paper's bubble cloud: a
+Rayleigh-Plesset cell (32b) whose flow into its pressure node is the paper's (A1), so that a
+chain of cells joined by 1/dx^2 is the discretised cloud with no ddt on the pressure rows. The
+radius is held as ln y: with y as the unknown, the first DC iterate is y = 0 and the operating
+point fails with E0603 (y^-4 infinite). No simulator change.
+  * Small signal against the paper's eq. (13b): within 4.8e-7 relative at 401 points.
+  * omega = 2, fixed g, against scipy (DOP853, rtol 1e-11) at --reltol 1e-5: periods 1 / 2 / 3 / 6
+    all match at g = 0.05 ... 3.5, with orbit values within 3.8e-4. The period-1 orbit's Floquet
+    threshold is g_c = 0.10201.
+  * Cost: at the default --reltol 1e-3, g = 2.5 settles on a different attractor than scipy, so
+    the decks state --reltol 1e-5. bubble_single.net takes 40 s at that tolerance (17 s at 1e-3).
+  * A slow sweep jumps to period 2 at g = 0.2284 (1e-5), 0.2198 (1e-4), 0.2149 (1e-3); scipy jumps
+    at 0.2695. All of these are well past g_c: it is a delayed bifurcation whose delay is set by
+    the size of the seed perturbation, which here is the integrator's error. A sweep's jump point
+    is therefore not a threshold, and the paper's g ~ 0.4 (Fig. 9) is not a number to match.
+  * Not run here: the cell's (A1) flow into its pressure node, since an ideal source absorbs it. The
+    ladder is the next step.
+  * Found on the way: .ac needs a netlist source with an AC spec. An `ac_stim` in a Verilog-A
+    source does not satisfy the E0720 check; that is left as it is.
+
+
 2.44.0+4 - 2026-10-25
 ---------------------
 **The ISCAS'85 plain-Newton finding is parked as future work.** Docs only. The author decided to

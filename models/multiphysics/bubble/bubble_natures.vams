@@ -1,0 +1,65 @@
+// Natures for the bubble-cloud example (Smereka & Banerjee, Phys. Fluids 31, 3519, 1988).
+// Include-guarded. Everything is dimensionless, as in the paper:
+//
+//   bubble_pressure  the mixture's mean pressure p = P/P0 as potential; the flow is d^2p/dx^2
+//                    (lengths in R0), so Kirchhoff's current law at a pressure node is the
+//                    paper's eq. (32a) once the links between nodes conduct 1/dx^2;
+//   bubble_radius    the log of the bubble radius, ln y = ln(R/R0), as the potential of a state
+//                    node (the log keeps y positive; see bubble_parts.va);
+//   bubble_velocity  its rate dy/dt (time in units of 1/Omega0, Omega0 the bubble's natural
+//                    angular frequency) as the potential of a second state node.
+`ifndef BUBBLE_NATURES_VAMS
+`define BUBBLE_NATURES_VAMS
+
+nature Bubble_pressure
+    units  = "P0";
+    access = Pb;
+    abstol = 1e-9;
+endnature
+
+nature Bubble_pressure_curvature
+    units  = "P0/R0^2";
+    access = Pxx;
+    abstol = 1e-9;
+endnature
+
+nature Bubble_radius
+    units  = "ln(R/R0)";
+    access = Rad;
+    abstol = 1e-9;
+endnature
+
+nature Bubble_radius_residual
+    units  = "Omega0";
+    access = Rad_res;
+    abstol = 1e-9;
+endnature
+
+nature Bubble_velocity
+    units  = "R0*Omega0";
+    access = Vel;
+    abstol = 1e-9;
+endnature
+
+nature Bubble_velocity_residual
+    units  = "R0*Omega0^2";
+    access = Vel_res;
+    abstol = 1e-9;
+endnature
+
+discipline bubble_pressure
+    potential Bubble_pressure;
+    flow      Bubble_pressure_curvature;
+enddiscipline
+
+discipline bubble_radius
+    potential Bubble_radius;
+    flow      Bubble_radius_residual;
+enddiscipline
+
+discipline bubble_velocity
+    potential Bubble_velocity;
+    flow      Bubble_velocity_residual;
+enddiscipline
+
+`endif

@@ -1,0 +1,107 @@
+// Parts for a periodically driven bubble cloud (Smereka & Banerjee, "The dynamics of periodically
+// driven bubble clouds", Phys. Fluids 31, 3519, 1988; references/ in this repository).
+//
+// The paper's averaged two-phase model, dimensionless (radius y = R/R0, pressure p = P/P0, time
+// in units of 1/Omega0 with Omega0 = sqrt(3 gamma P0 / rho_l)/R0 the bubble's natural frequency,
+// gamma = 4/3, length x in units of R0):
+//
+//   p_xx = -4 alpha0 (y^3)_tt                                                         (32a)
+//   y y_tt + 3/2 y_t^2 = 1/4 (y^-4 - p) - y_t (mu/y + nu/y^4)                          (32b)
+//
+// with alpha0 the void fraction at rest, mu the liquid's viscosity and nu its compressibility
+// (the reciprocal of the dimensionless sound speed), as Herring's acoustic damping.
+//
+// # As a circuit
+//
+// `bubble` is one bubble and the slice of mixture around it. Its port is a pressure node; inside
+// it holds two state nodes, the log-radius ln y and the rate w = y_t, whose rows are (32b)
+// written as two first-order equations. The log keeps the radius positive whatever a Newton
+// iterate does, and puts the bubble at rest (y = 1) where every solve starts (all unknowns 0);
+// with y itself as the unknown the first iterate is y = 0 and y^-4 is infinite. Its flow into the pressure node is the paper's eq. (A1): (32a) with
+// y_tt eliminated through (32b),
+//
+//   p_xx = 3 alpha0 y p - 12 alpha0 y [ w^2/2 + y^-4/4 - w (mu/y + nu/y^4) ],
+//
+// so the pressure row has no ddt in it: it is algebraic, with a shunt conductance 3 alpha0 y and
+// a state-dependent source. A chain of cells joined by conductances 1/dx^2 is then the paper's
+// discretised cloud (A3); a single cell driven by `bubble_drive` is one bubble in an infinite
+// liquid (alpha0 has no effect there: an ideal pressure source absorbs the cell's flow).
+//
+// `bubble_drive` imposes p = 1 + g sin(omega t) on its node, with g growing at `gdot` per unit
+// time from `g` for slow sweeps. The paper writes cos(omega t); sin is used so that the DC
+// operating point, at t = 0, is the bubble at rest (p = 1, y = 1, w = 0). The phase only moves
+// where a stroboscopic sample falls in the cycle. For an AC analysis drive the pressure node with
+// a netlist source instead (`V... p gnd DC 1 AC 1`; frequencies are in Hz there, so omega = 1 is
+// 1/(2 pi) = 0.159155 Hz).
+//
+// # Stroboscopic (Poincare) samples
+//
+// With `tpoinc` > 0 the cell prints its state every `tpoinc` from `tskip` on:
+//   <instance>: poincare t=<t> y=<y> w=<w> p=<p>
+// `timer` makes each sample an exact time point; set tpoinc = 2 pi / omega for the paper's maps.
+//
+// # Limitations
+//
+// Near a violent collapse y^-4 grows fast and the step control has to resolve it; a run that
+// drives the bubbles that hard is outside what the averaged model describes anyway (the paper's
+// Fig. 14 discussion). Heat and mass transfer are ignored and the gas is polytropic with
+// gamma = 4/3, as in the paper.
+`include "bubble_natures.vams"
+
+module bubble(p);
+    inout p;
+    bubble_pressure p;
+
+    parameter real alpha0 = 0.001 from [0:inf);   // void fraction at rest
+    parameter real mu     = 0.002 from [0:inf);   // dimensionless viscosity mu_l Omega0 / P0
+    parameter real nu     = 0.015 from [0:inf);   // R0 Omega0 / C_l (liquid compressibility)
+    parameter real tpoinc = 0     from [0:inf);   // stroboscopic sample period (0 = off)
+    parameter real tskip  = 0     from [0:inf);   // first sample time
+
+    bubble_radius   y;
+    bubble_velocity w;
+
+    real ly, yy, ww, pp, yi, y4, damp;
+
+    analog begin
+        ly = Rad(y);
+        yy = exp(ly);
+        ww = Vel(w);
+        pp = Pb(p);
+        yi = 1.0 / yy;
+        y4 = yi * yi * yi * yi;
+        damp = ww * (mu * yi + nu * y4);
+
+        // (32b) as two first-order rows: (ln y)_t = w/y, w_t = (1/y)[1/4 (y^-4 - p) - 3/2 w^2 -
+        // damping].
+        Rad_res(y) <+ ddt(ly) - ww * yi;
+        Vel_res(w) <+ ddt(ww) - yi * (0.25 * (y4 - pp) - 1.5 * ww * ww - damp);
+
+        // (A1): the flow d^2p/dx^2 this slice draws from its pressure node.
+        Pxx(p) <+ 3.0 * alpha0 * yy * pp
+                  - 12.0 * alpha0 * yy * (0.5 * ww * ww + 0.25 * y4 - damp);
+
+        if (tpoinc > 0.0) begin
+            @(timer(tskip, tpoinc))
+                $strobe("%m: poincare t=%.15e y=%.12e w=%.12e p=%.12e", $abstime, yy, ww, pp);
+        end
+    end
+endmodule
+
+module bubble_drive(p);
+    inout p;
+    bubble_pressure p;
+
+    parameter real g     = 0.1  from [0:inf);   // driving amplitude at t = 0
+    parameter real gdot  = 0    from (-inf:inf);  // growth of g per unit time (slow sweeps)
+    parameter real omega = 1    from (0:inf);   // driving angular frequency (units of Omega0)
+    parameter real nper  = 100  from (0:inf);   // largest time step: 1/nper of a period
+
+    real amp;
+
+    analog begin
+        amp = g + gdot * $abstime;
+        Pb(p) <+ 1.0 + amp * sin(omega * $abstime);
+        $bound_step(6.283185307179586 / (omega * nper));
+    end
+endmodule

@@ -1,0 +1,19 @@
+* Bubble cloud, part 1c: one bubble at omega = 2 with the drive grown slowly, as in the paper.
+*
+* The amplitude rises from 0 to 1 over 20000 time units (6366 driving periods, gdot = 5e-5), and
+* the bubble's state is printed once per period: a single bubble's bifurcation diagram, the
+* analogue of the paper's Fig. 9 for a bubble at the edge of the cloud.
+* The period-1 orbit is unstable from g_c = 0.10201 (Floquet multiplier -1), but a slow sweep
+* does not leave it there: the subharmonic grows from whatever perturbation it starts from, and
+* the smaller that is, the later the jump (a delayed bifurcation). The jump point therefore
+* depends on the sweep rate and on the integrator's error, and is not a property of the bubble.
+* What to look for (measured at 2.44.0+5): the jump to period 2 at g = 0.2284 at --reltol 1e-5
+*   (0.2149 at 1e-3, 0.2198 at 1e-4; scipy at rtol 1e-11, a much smaller seed, 0.2695). From
+*   g = 0.3 on the samples follow scipy's within 3.5e-4 (1.5e-3 at --reltol 1e-3), on the
+*   fixed-amplitude orbits of bubble_single.net.
+* Plot and check: python docs/examples/multiphysics/bubble_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/bubble_ramp.net --model models/multiphysics/bubble --tran --reltol 1e-5 --report p
+XD p bubble_drive g=0 gdot=5e-5 omega=2 nper=50
+XB p bubble tpoinc=3.141592653589793 tskip=3.141592653589793
+.tran 0.1 20000
+.end
