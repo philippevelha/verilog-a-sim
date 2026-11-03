@@ -22,6 +22,27 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.53.0 - 2026-11-03
+-------------------
+**`.noise` accepts `oct` and `lin` grids**, as `.ac` has since 2026-08-31 (101-circuits A5; it was
+E0710 "no parseable .noise card"). `NoiseCard::points_per_decade` is now `points` plus `kind`
+(an internal API change; va-cli was its only user).
+  * Why `dec` only was wrong: it rested on "the integrated total assumes logarithmic spacing", and
+    it does not. The total is a trapezoid rule in linear frequency (va_acnoise integrate_rms), valid
+    on any grid.
+  * New QSPICE gate, `circuits/resistor_noise_lin.net`: a compiled resistor into 10 nF,
+    `lin 10 1k 100k`, with the 15.9 kHz corner inside the sweep. All 10 points match QSPICE, error
+    5.6e-16. The totals differ: 598.1 nV rms here, 577.4 nV in QSPICE's printout, against an exact
+    integral of 596.7 nV. Ours is 0.23% off on 10 points; QSPICE's is 3.2% low. The total is a
+    summary, not a gated quantity.
+  * A5 now runs. Its input-referred total (924 V rms) looks absurd but is right for the deck as
+    written: VS (DC 0) drives the base through 1k with no coupling capacitor, so the base sits at
+    0.012 V, the transistor is off, and the gain from VS is ~2e-9. That is a property of the deck;
+    the same numbers come out on a `dec` grid.
+  * Figures: cargo test --workspace 1051 passed, 0 failed (the noise parser test now covers lin
+    and oct, and an unknown grid word still leaves no card); xtask validate 33/33.
+
+
 2.52.0 - 2026-11-03
 -------------------
 **`.temp <degC>` is applied** (101-circuits A1; it was W0505, "not applied"). Every compiled model

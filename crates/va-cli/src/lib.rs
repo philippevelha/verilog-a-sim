@@ -3284,8 +3284,12 @@ fn sizing_for(
                 _ => net.noise.as_ref().map(|c| va_acnoise::ac::AcSweep {
                     fstart: c.fstart,
                     fstop: c.fstop,
-                    points: c.points_per_decade,
-                    kind: va_acnoise::ac::AcSweepKind::Dec,
+                    points: c.points,
+                    kind: match c.kind {
+                        va_netlist::AcSweepKindCard::Dec => va_acnoise::ac::AcSweepKind::Dec,
+                        va_netlist::AcSweepKindCard::Oct => va_acnoise::ac::AcSweepKind::Oct,
+                        va_netlist::AcSweepKindCard::Lin => va_acnoise::ac::AcSweepKind::Lin,
+                    },
                 }),
             };
             estimate::Points::Exact(sweep.map_or(1, |s| s.frequencies().len()))
@@ -3423,13 +3427,17 @@ fn solve_noise_impl(
         return Err(va_diag::Diagnostic::new(va_diag::codes::E0724).into());
     }
 
+    // The card's own grid, as `.ac` does (2.53.0; `dec` only before). The integrated total is a
+    // linear-frequency trapezoid rule, valid on any of the three grids.
     let sweep = va_acnoise::ac::AcSweep {
         fstart: card.fstart,
         fstop: card.fstop,
-        // `.noise` stays `dec`-only: its integrated-total maths assumes logarithmic
-        // spacing, so accepting `lin` here would quietly change what the total means.
-        points: card.points_per_decade,
-        kind: va_acnoise::ac::AcSweepKind::Dec,
+        points: card.points,
+        kind: match card.kind {
+            va_netlist::AcSweepKindCard::Dec => va_acnoise::ac::AcSweepKind::Dec,
+            va_netlist::AcSweepKindCard::Oct => va_acnoise::ac::AcSweepKind::Oct,
+            va_netlist::AcSweepKindCard::Lin => va_acnoise::ac::AcSweepKind::Lin,
+        },
     };
     va_acnoise::noise::run_with(
         &refs,

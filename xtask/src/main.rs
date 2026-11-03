@@ -199,6 +199,10 @@ const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[
         Some("models/resistor.va"),
     ),
     (
+        "circuits/resistor_noise_lin.net",
+        Some("models/resistor.va"),
+    ),
+    (
         "circuits/diode_flicker.net",
         Some("models/diode_flicker.va"),
     ),
@@ -221,6 +225,7 @@ const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[
 const QSPICE_NATIVE_NOISE_CIRCUITS: &[&str] = &[
     "circuits/resistor_noise_va.net",
     "circuits/resistor_noise_hot.net",
+    "circuits/resistor_noise_lin.net",
     "circuits/resistor_noise_table.net",
     "circuits/resistor_noise_table_log.net",
 ];

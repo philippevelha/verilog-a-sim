@@ -64,14 +64,21 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all thirty-two — are real, QSPICE-generated data (`cargo xtask
+`golden/*.golden` — all thirty-three — are real, QSPICE-generated data (`cargo xtask
 gen-golden`): `{divider, vcvs_amp, cccs_mirror, mos_dc, diode_iv, diode_iv_params, diode_clamp,
 divider_hv, rc_step, rc_step_hv, rc_discharge, rl_decay, rlc_ring, rectifier, ring_osc,
 abstime_ramp, vsin_load, laplace_step, rc_ac, rc_ac_lin, rc_ac_oct, diode_ac, laplace_ac,
 diode_noise, resistor_noise_va, diode_flicker, resistor_noise_table, resistor_noise_table_log,
-isource_bias, isource_rc, isource_ac, resistor_noise_hot}`. Every one of `xtask`'s known circuits
+isource_bias, isource_rc, isource_ac, resistor_noise_hot, resistor_noise_lin}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
+
+**Added 2026-11-03 (2.53.0): `circuits/resistor_noise_lin.net`, `.noise` on a linear grid.** A
+compiled resistor into 10 nF, `lin 10 1k 100k`: 4kTR/(1+(f/fc)²) with the 15.9 kHz corner inside
+the sweep, so the comparison covers the roll-off. All 10 points match QSPICE (`error=5.6e-16`).
+The integrated totals differ: 598.1 nV rms here, 577.4 nV in QSPICE's printout. The exact integral
+is 596.7 nV, so this engine's linear-frequency trapezoid rule is 0.23 % off it on these 10 points
+and QSPICE's is 3.2 % low. The total is a summary, not the gated quantity.
 
 **Added 2026-11-03 (2.52.0): `circuits/resistor_noise_hot.net`, the `.temp` gate.**
 `resistor_noise_va.net` with `.temp 100`: two compiled `models/resistor.va` resistors whose

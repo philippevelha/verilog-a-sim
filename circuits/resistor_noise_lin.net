@@ -1,0 +1,11 @@
+* `.noise ... lin` gate (2.53.0): an RC low-pass's thermal noise on a linear grid.
+* A compiled resistor (models/resistor.va, noise 4k*$temperature/R) feeds a 10 nF capacitor, probed
+* across the capacitor. The spectrum is 4kTR/(1 + (2*pi*f*R*C)^2): 1.657e-17 V^2/Hz at DC, halved at
+* the 15.9 kHz corner, inside the 1k-100k sweep, so the comparison sees the roll-off, not just a
+* flat line. `lin 10` is ten points in total, as in SPICE. Pure R/C/V, so QSPICE runs it as written.
+*   cargo run -p va-cli -- sim circuits/resistor_noise_lin.net --model models/resistor.va --noise
+V1 in  gnd  DC 0
+R1 in  a    1000
+C1 a   gnd  10n
+.noise V(a) V1 lin 10 1k 100k
+.end

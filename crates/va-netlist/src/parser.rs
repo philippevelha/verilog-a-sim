@@ -518,24 +518,32 @@ fn parse_card(net: &mut Netlist, body: &str, here: &str) -> Result<(), Diagnosti
             }
         }
     }
-    // `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` (T5.2) — SPICE's
+    // `.noise V(<out>) <source> dec|oct|lin <points> <fstart> <fstop>` (T5.2) — SPICE's
     // standard positional noise card: an output *probe*, an input source, then the same
-    // frequency-grid spec `.ac` takes, except that `.noise` stays `dec`-only (see below).
+    // frequency-grid spec `.ac` takes (`oct`/`lin` since 2.53.0; see `crate::NoiseCard`).
     if card == AnalysisCard::Noise {
-        let is_dec = toks.get(3).is_some_and(|t| t.eq_ignore_ascii_case("dec"));
-        if let (Some(output), Some(source), true, Some(ppd), Some(fstart), Some(fstop)) = (
+        let kind = toks
+            .get(3)
+            .and_then(|t| match t.to_ascii_lowercase().as_str() {
+                "dec" => Some(AcSweepKindCard::Dec),
+                "oct" => Some(AcSweepKindCard::Oct),
+                "lin" => Some(AcSweepKindCard::Lin),
+                _ => None,
+            });
+        if let (Some(output), Some(source), Some(kind), Some(points), Some(fstart), Some(fstop)) = (
             toks.get(1).and_then(|t| parse_voltage_probe(t)),
             toks.get(2).map(|s| s.to_string()),
-            is_dec,
+            kind,
             toks.get(4).and_then(|v| parse_value(v)),
             toks.get(5).and_then(|v| parse_value(v)),
             toks.get(6).and_then(|v| parse_value(v)),
         ) {
-            if ppd >= 1.0 {
+            if points >= 1.0 {
                 net.noise = Some(NoiseCard {
                     output,
                     source,
-                    points_per_decade: ppd as usize,
+                    points: points as usize,
+                    kind,
                     fstart,
                     fstop,
                 });
@@ -1234,11 +1242,20 @@ mod tests {
             Some(NoiseCard {
                 output: "a".to_string(),
                 source: "V1".to_string(),
-                points_per_decade: 10,
+                points: 10,
+                kind: AcSweepKindCard::Dec,
                 fstart: 10.0,
                 fstop: 1e7,
             })
         );
+        // `oct` and `lin` read as `.ac` reads them (2.53.0); the `lin` count is a total.
+        let lin = parse("* t\nR1 a 0 1k\n.noise V(a) V1 lin 100 10 1meg\n.end\n").expect("parse");
+        assert_eq!(
+            lin.noise.map(|c| (c.points, c.kind, c.fstart, c.fstop)),
+            Some((100, AcSweepKindCard::Lin, 10.0, 1e6))
+        );
+        let oct = parse("* t\nR1 a 0 1k\n.noise V(a) V1 OCT 3 10 1k\n.end\n").expect("parse");
+        assert_eq!(oct.noise.map(|c| c.kind), Some(AcSweepKindCard::Oct));
     }
 
     #[test]
@@ -1257,11 +1274,11 @@ mod tests {
     fn a_deck_with_no_noise_card_has_no_noise_spec() {
         let net = parse("* t\nR1 a 0 1k\n.op\n.end\n").expect("parse");
         assert_eq!(net.noise, None);
-        // A `lin` grid is recognized as noise analysis but leaves nothing parseable, exactly as
-        // for `.ac`.
-        let lin = parse("* t\nR1 a 0 1k\n.noise V(a) V1 lin 100 10 1meg\n.end\n").expect("parse");
-        assert_eq!(lin.analysis, AnalysisCard::Noise);
-        assert_eq!(lin.noise, None);
+        // An unrecognized sweep type is recognized as noise analysis but leaves nothing
+        // parseable, exactly as for `.ac`.
+        let log = parse("* t\nR1 a 0 1k\n.noise V(a) V1 log 100 10 1meg\n.end\n").expect("parse");
+        assert_eq!(log.analysis, AnalysisCard::Noise);
+        assert_eq!(log.noise, None);
     }
 
     #[test]

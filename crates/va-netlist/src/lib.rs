@@ -145,13 +145,14 @@ pub struct Netlist {
     pub temp: Option<f64>,
 }
 
-/// A `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` card (T5.2): sweep the
+/// A `.noise V(<out>) <source> dec|oct|lin <points> <fstart> <fstop>` card (T5.2): sweep the
 /// small-signal output noise PSD at node `output`, linearized about the DC operating point.
 ///
-/// The frequency grid is specified as [`AcSweepCard`]'s is, but **`dec` only**: unlike `.ac`,
-/// which gained `oct`/`lin` on 2026-08-31, the noise analysis's integrated-total maths assumes
-/// logarithmic spacing, so accepting a linear grid here would quietly change what the reported
-/// total means rather than merely resampling the spectrum.
+/// The frequency grid is specified exactly as [`AcSweepCard`]'s is. Until 2.53.0 it was `dec`
+/// only, on the reasoning that the integrated total assumed logarithmic spacing. It does not: the
+/// total is a trapezoid rule in *linear* frequency (`va_acnoise::noise`'s `integrate_rms`), valid
+/// on any grid and if anything more accurate on a linear one. So `oct` and `lin` are read as
+/// `.ac` reads them (101-circuits report, A5).
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoiseCard {
     /// The output node's name, unwrapped from the card's own `V(<name>)` spelling.
@@ -163,8 +164,11 @@ pub struct NoiseCard {
     /// not compute (§ its own stated limitations). Parsed anyway so a standard SPICE deck is
     /// accepted unchanged and so the field is already here when input-referral lands.
     pub source: String,
-    /// Frequency points per decade.
-    pub points_per_decade: usize,
+    /// Point count, interpreted per [`Self::kind`]: per decade, per octave, or in total
+    /// (`points_per_decade` until 2.53.0, when only `dec` was read).
+    pub points: usize,
+    /// Spacing rule, from the card's own `dec`/`oct`/`lin` token.
+    pub kind: AcSweepKindCard,
     /// Start frequency (Hz).
     pub fstart: f64,
     /// Stop frequency (Hz).
