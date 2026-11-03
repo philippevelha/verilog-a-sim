@@ -195,6 +195,10 @@ const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/diode_noise.net", None),
     ("circuits/resistor_noise_va.net", Some("models/resistor.va")),
     (
+        "circuits/resistor_noise_hot.net",
+        Some("models/resistor.va"),
+    ),
+    (
         "circuits/diode_flicker.net",
         Some("models/diode_flicker.va"),
     ),
@@ -216,6 +220,7 @@ const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[
 /// PSD is `4kT/R` at every point, so a plain QSPICE resistor is again the exact oracle.
 const QSPICE_NATIVE_NOISE_CIRCUITS: &[&str] = &[
     "circuits/resistor_noise_va.net",
+    "circuits/resistor_noise_hot.net",
     "circuits/resistor_noise_table.net",
     "circuits/resistor_noise_table_log.net",
 ];

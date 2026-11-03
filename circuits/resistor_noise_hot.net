@@ -1,0 +1,15 @@
+* `.temp` gate (2.52.0): resistor_noise_va.net at 100 degC instead of 27 degC.
+* The same two compiled resistors (models/resistor.va, whose noise is
+*   I(p,n) <+ white_noise(4*`P_K*$temperature/R)
+* ) across a 1 V source, probed at their junction. `.temp 100` builds the models at 373.15 K, so
+* `$temperature` reads it and the spectrum is 4kT*(R1||R2) at 373.15 K:
+*   S(out) = 4 * 1.380649e-23 * 373.15 * 750 ~ 1.546e-17 V^2/Hz, flat,
+* i.e. resistor_noise_va.net's answer times 373.15/300.15. Pure R/V, so QSPICE runs it as written,
+* with its own resistors at its own `.temp`.
+*   cargo run -p va-cli -- sim circuits/resistor_noise_hot.net --model models/resistor.va --noise
+V1 in  gnd  DC 1
+R1 in  a    1000
+R2 a   gnd  3000
+.temp 100
+.noise V(a) V1 dec 10 10 10meg
+.end

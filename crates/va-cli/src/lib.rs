@@ -870,6 +870,13 @@ pub fn run_sim(
             eprintln!("{line}");
         }
         eprintln!("{}", estimate::solver_line(solver, sizing.unknowns));
+        // Said only when the deck moved it: every run before 2.52.0 was at 27 °C, silently.
+        if let Some(celsius) = net.temp {
+            eprintln!(
+                "[va-cli] temperature: {celsius} °C ({:.2} K), from `.temp`",
+                deck_temp_k(&net)
+            );
+        }
     }
     // Plottable analyses are the ones that produce a *curve*: a transient waveform, or a `.dc`
     // sweep. A bare DC operating point is a single point — plotting one would be an empty
@@ -1746,7 +1753,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     // Lives across the whole device loop, which is the point: a deck's thousands of gates are
     // placed from a handful of model cards, and this is what makes the arena be cloned and
     // lowered once per *card* rather than once per device.
-    let mut cache = CompiledCache::new();
+    let mut cache = CompiledCache::at(deck_temp_k(net));
     // Every ideal short (`V(p,n) <+ 0.0`) placed so far, across all devices — see
     // [`ShortForest`]. Deck order decides which of two redundant shorts is kept.
     let mut shorts = ShortForest::default();
@@ -2473,7 +2480,7 @@ fn solve_dc_sweep_impl(
         // across points anyway, and a cache hoisted out of this loop would only accumulate one
         // dead entry per point. A source's module is small; the sweep's real cost saving is
         // that the *other* devices are not rebuilt at all.
-        let mut cache = CompiledCache::new();
+        let mut cache = CompiledCache::at(deck_temp_k(net));
         // A fresh forest is exact here only because the swept device is a `vsource` (checked
         // above), a primitive with no ideal shorts for the forest to decide about.
         let mut shorts = ShortForest::default();
@@ -3431,7 +3438,7 @@ fn solve_noise_impl(
         sweep,
         output,
         input,
-        va_abi::noise::TEMP_NOMINAL,
+        deck_temp_k(net),
         solver,
     )
     .context("noise sweep failed")
@@ -3936,7 +3943,33 @@ fn split_multiplicity(module: &Module, overrides: &[(String, f64)]) -> Result<Sp
 /// The key's module half is the address of the `Module` in the caller's `compiled` slice, stable
 /// for the whole build and cheaper than comparing names. The override half is canonicalized by
 /// sorting, so two device lines setting the same parameters in a different order still share.
-type CompiledCache = std::collections::HashMap<(usize, String), va_codegen::CompiledModel>;
+///
+/// **It also carries the temperature** every model in it is built at (the deck's `.temp`,
+/// 2.52.0). A compiled model bakes its temperature in, as it bakes in its parameters, so a cache
+/// shared across temperatures would hand a 27 °C model to a 100 °C build. One cache serves one
+/// build, at one temperature, which is what holding it here (rather than in the key) says.
+struct CompiledCache {
+    models: std::collections::HashMap<(usize, String), va_codegen::CompiledModel>,
+    /// Kelvin.
+    temp: f64,
+}
+
+impl CompiledCache {
+    /// An empty cache whose models are built at `temp` kelvin.
+    fn at(temp: f64) -> Self {
+        Self {
+            models: std::collections::HashMap::new(),
+            temp,
+        }
+    }
+}
+
+/// The temperature a deck's analyses run at, in kelvin: its `.temp` (°C) if it has one, else
+/// the nominal 300.15 K (27 °C) every analysis used before 2.52.0.
+fn deck_temp_k(net: &Netlist) -> f64 {
+    net.temp
+        .map_or(va_codegen::TEMP, |celsius| celsius + 273.15)
+}
 
 /// A union-find over global unknowns, joined by every ideal short (`V(p,n) <+ 0.0`) placed so
 /// far — `va_codegen::CompiledModel::ideal_shorts`.
@@ -4019,6 +4052,7 @@ fn compile_with_overrides(
     overrides: &[(String, f64)],
     multiplicity: Option<f64>,
     unconnected: &[usize],
+    temp: f64,
 ) -> Result<va_codegen::CompiledModel> {
     let mut m = module.clone();
     m.mfactor = multiplicity;
@@ -4110,7 +4144,7 @@ fn compile_with_overrides(
         }
     }
 
-    va_codegen::CompiledModel::new(&m)
+    va_codegen::CompiledModel::new_at(&m, temp)
         .map_err(anyhow::Error::new)
         .with_context(|| format!("compiling model `{}`", module.name))
 }
@@ -4204,15 +4238,21 @@ fn build_from_model(
     let (multiplicity, plain_overrides) = split_multiplicity(module, overrides)?;
     let unconnected = unconnected_ports(module, terminals)?;
     let key = compiled_key(module, value, overrides, &unconnected);
-    if !cache.contains_key(&key) {
-        let compiled =
-            compile_with_overrides(module, value, &plain_overrides, multiplicity, &unconnected)?;
-        cache.insert(key.clone(), compiled);
+    if !cache.models.contains_key(&key) {
+        let compiled = compile_with_overrides(
+            module,
+            value,
+            &plain_overrides,
+            multiplicity,
+            &unconnected,
+            cache.temp,
+        )?;
+        cache.models.insert(key.clone(), compiled);
     }
     // Everything below reads the module and never writes it — the one thing that did write it,
     // `$port_connected` marking, moved above the compile and into the key — so the compiled
     // model's own copy serves, and placing a device no longer clones a 40,000-node arena.
-    let compiled = cache[&key].clone();
+    let compiled = cache.models[&key].clone();
     let m = compiled.module();
 
     let port_nodes: Vec<NodeId> = module.ports.iter().flatten().copied().collect();
@@ -4702,6 +4742,75 @@ mod tests {
     /// folded: a bus declared `[0:n-1]` kept its default width, and `b = 2*a` kept the default
     /// `a`'s value — both silently. Two devices on the same deck with different values get
     /// their own elaborations, and one at the default keeps the library's.
+    /// `.temp` (2.52.0) reaches a compiled model's `$temperature` and `$vt`, and the `4kT` of
+    /// the netlist's own resistors in `.noise`. Without the card both stay at 300.15 K.
+    #[test]
+    fn the_temp_card_sets_temperature_vt_and_resistor_noise() {
+        let dir = std::env::temp_dir().join("va_cli_temp_card_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("thermo.va");
+        std::fs::write(
+            &model,
+            "`include \"disciplines.vams\"
+             module thermo(t, v); inout t, v; electrical t, v;
+             analog begin V(t) <+ 1e-3 * $temperature; V(v) <+ $vt; end
+endmodule
+",
+        )
+        .unwrap();
+        let run = |card: &str| {
+            let deck = dir.join("thermo.net");
+            std::fs::write(
+                &deck,
+                format!(
+                    "* temp
+X1 t v thermo
+{card}.op
+.end
+"
+                ),
+            )
+            .unwrap();
+            let (net, compiled) = load(
+                &deck.display().to_string(),
+                Some(&model.display().to_string()),
+            )
+            .expect("loads");
+            let op = solve_dc(&net, &compiled).expect("solves");
+            let at = |n: &str| op.x[net.node_order.iter().position(|x| x == n).unwrap()];
+            (at("t"), at("v"))
+        };
+        let (t, v) = run(".temp 100
+");
+        assert!((t - 0.37315).abs() < 1e-12, "$temperature read {t} kK");
+        let vt = va_codegen::VT * 373.15 / va_codegen::TEMP;
+        assert!((v - vt).abs() < 1e-15, "$vt read {v}, expected {vt}");
+        let (t, v) = run("");
+        assert!((t - 0.30015).abs() < 1e-12, "$temperature read {t} kK");
+        assert_eq!(v, va_codegen::VT, "nominal $vt is bit-identical");
+
+        let noise = |card: &str| {
+            let net = va_netlist::parser::parse(&format!(
+                "I1 0 out DC 0 AC 1
+R1 out 0 1k
+{card}.noise V(out) I1 dec 1 1k 10k
+.end
+"
+            ))
+            .expect("parses");
+            solve_noise(&net, &[]).expect("noise").psd[0]
+        };
+        let ratio = noise(
+            ".temp 100
+",
+        ) / noise("");
+        assert!(
+            (ratio - 373.15 / 300.15).abs() < 1e-12,
+            "4kT scaled by {ratio}"
+        );
+    }
+
     #[test]
     fn a_device_override_of_a_folded_parameter_is_elaborated_with_its_value() {
         let dir = std::env::temp_dir().join("va_cli_folded_override_test");

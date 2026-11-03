@@ -156,6 +156,12 @@ class of lexemes.
   to its `default` argument (or errors, matching the LRM's behavior for an unknown simulator
   parameter with no default — v0 has no simulator-parameter store at all).
 
+  `$temperature` reads the temperature the model was **built** at, and `$vt` is `kT/q` there.
+  That is 300.15 K (27 °C) unless the deck has a `.temp <°C>` card: since 2.52.0 `va-cli` builds
+  every compiled model at the deck's temperature (`va_codegen::CompiledModel::new_at`), and `$vt`
+  scales as `VT·T/300.15`. It is fixed for the run; the model's bias-independent setup, where
+  temperature scaling usually lives, is computed once from it.
+
   `$abstime` (the absolute simulation time, LRM §9.17.1) **used to fold to a constant `0.0`**,
   which was right while there was no time axis and became wrong the moment `va-transient`
   landed: it froze every time-dependent model at t = 0. It now lowers to a zero-argument

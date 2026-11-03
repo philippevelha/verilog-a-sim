@@ -64,14 +64,24 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all thirty-one — are real, QSPICE-generated data (`cargo xtask
+`golden/*.golden` — all thirty-two — are real, QSPICE-generated data (`cargo xtask
 gen-golden`): `{divider, vcvs_amp, cccs_mirror, mos_dc, diode_iv, diode_iv_params, diode_clamp,
 divider_hv, rc_step, rc_step_hv, rc_discharge, rl_decay, rlc_ring, rectifier, ring_osc,
 abstime_ramp, vsin_load, laplace_step, rc_ac, rc_ac_lin, rc_ac_oct, diode_ac, laplace_ac,
 diode_noise, resistor_noise_va, diode_flicker, resistor_noise_table, resistor_noise_table_log,
-isource_bias, isource_rc, isource_ac}`. Every one of `xtask`'s known circuits
+isource_bias, isource_rc, isource_ac, resistor_noise_hot}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
+
+**Added 2026-11-03 (2.52.0): `circuits/resistor_noise_hot.net`, the `.temp` gate.**
+`resistor_noise_va.net` with `.temp 100`: two compiled `models/resistor.va` resistors whose
+noise is `4k·$temperature/R`, against QSPICE's own resistors at its own `.temp 100`. The answer
+is 4kT·750 Ω at 373.15 K, 1.5456e-17 V²/Hz flat (`error=1.1e-16`). It discriminates: at the old
+fixed 300.15 K it would be 24 % low. It checks that the deck's temperature reaches
+`$temperature`, not any model's temperature scaling. A DC check of a BJT's V_BE against QSPICE
+was done by hand and is not a gate. The 101-circuit deck A1 gives 0.597962 V at 100 °C against
+QSPICE 0.597960 V. At −40 °C that model reads 6 mV high, because `npn.va` continues `exp`
+linearly above an argument of 40, and V_BE/V_t ≈ 40.9 there: a model limitation, not `.temp`.
 
 **Added 2026-11-03 (2.47.0): `circuits/isource_{bias,rc,ac}.net`, the independent current
 source.** One deck per analysis, each with a hand-derivable answer. `isource_bias` puts 0.5 mA

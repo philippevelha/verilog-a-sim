@@ -33,7 +33,8 @@
 //!   order, each `Stmt::Assign` binding into [`ad::Ctx::vars`] for later statements (including
 //!   later assignments — a variable can be reassigned) to read via [`ad::Ctx::set_var`]/the
 //!   [`ad::eval`] `Expr::Var` case.
-//! - `$vt`/`$temperature` evaluate at the fixed ambient point ([`VT`], [`TEMP`]); `$vt(T)`
+//! - `$vt`/`$temperature` evaluate at the temperature the model was built at: [`TEMP`] and
+//!   [`VT`], or the one given to [`CompiledModel::new_at`] (a deck's `.temp`, 2.52.0); `$vt(T)`
 //!   evaluates the thermal voltage at the given absolute temperature `T`, carrying `T`'s
 //!   gradient (e.g. a self-heating thermal node).
 
@@ -192,7 +193,23 @@ impl CompiledModel {
     /// lower, or one whose evaluation `validate` can already prove will fail. Doing it here
     /// means a model that cannot be built says so once rather than once per placement.
     pub fn new(module: &Module) -> Result<Self, CodegenError> {
-        Self::build(module, true)
+        Self::build(module, true, TEMP)
+    }
+
+    /// [`Self::new`] at simulation temperature `temp`, in kelvin (2.52.0, a deck's `.temp`):
+    /// what `$temperature` reads, with `$vt` scaled to match as [`VT`]`·temp/`[`TEMP`]. At
+    /// [`TEMP`] this is [`Self::new`] exactly, bit for bit.
+    ///
+    /// Fixed for the life of the model, as the nominal temperature always was: the model's
+    /// bias-independent setup (`lower::Lowered::static_prefix`), which typically holds its
+    /// temperature scaling, is computed once from it. A different temperature is a different
+    /// model, so a caller caching models must key or scope the cache by it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn new_at(module: &Module, temp: f64) -> Result<Self, CodegenError> {
+        Self::build(module, true, temp)
     }
 
     /// [`Self::new`] without the flat tapes ([`tape`]): every expression is evaluated by
@@ -204,10 +221,10 @@ impl CompiledModel {
     ///
     /// As [`Self::new`].
     pub fn new_without_tapes(module: &Module) -> Result<Self, CodegenError> {
-        Self::build(module, false)
+        Self::build(module, false, TEMP)
     }
 
-    fn build(module: &Module, with_tapes: bool) -> Result<Self, CodegenError> {
+    fn build(module: &Module, with_tapes: bool, temp: f64) -> Result<Self, CodegenError> {
         let lowered = lower::lower(module)?;
         let params: Vec<f64> = module.params.iter().map(|p| p.default).collect();
         // Scanned once rather than per Newton iteration: `unknown_is_junction` is consulted for
@@ -230,8 +247,10 @@ impl CompiledModel {
             slot_maps,
             ideal_shorts,
             collapse: OnceLock::new(),
-            vt: VT,
-            temp: TEMP,
+            // At the nominal temperature exactly `VT`, not `VT * TEMP / TEMP`, which need not
+            // round back to it.
+            vt: if temp == TEMP { VT } else { VT * temp / TEMP },
+            temp,
             node_is_junction,
             setup: OnceLock::new(),
             tapes,

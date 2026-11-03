@@ -137,6 +137,12 @@ pub struct Netlist {
     /// point the run starts from is solved with each named net *held* at its value, and the
     /// hold is dropped once integration begins. Names are resolved by `va-cli`.
     pub ics: Vec<(String, f64)>,
+    /// `.temp <°C>`: the temperature every analysis of the deck runs at, in **degrees Celsius**
+    /// as written (2.52.0). `None` without the card: 27 °C, the nominal 300.15 K. `va-cli`
+    /// builds compiled models at it, which is what `$temperature` and `$vt` read, and uses it
+    /// for the `4kT` of the netlist's own resistors in `.noise`. One value only: a list, or a
+    /// second `.temp` card, is an error (`E0535`) rather than a silent choice of one.
+    pub temp: Option<f64>,
 }
 
 /// A `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` card (T5.2): sweep the

@@ -1,0 +1,11 @@
+{
+  "code": "E0535",
+  "rev": 1,
+  "message": "`{card}` is not applied: {why}",
+  "description": "`.temp` sets the one temperature, in degrees Celsius, that every analysis of the deck runs at. It takes exactly one value above absolute zero, once per deck. SPICE reads a list of temperatures as one run per temperature; this simulator runs a deck once, and picking one value of the list would give an answer at a temperature the deck did not single out, so a list is refused instead.",
+  "actions": [
+    "Write a single value: `.temp 100` for 100 °C.",
+    "For several temperatures, run the deck once per temperature, editing the card between runs.",
+    "Remove a second `.temp` card: the deck can set the temperature only once."
+  ]
+}

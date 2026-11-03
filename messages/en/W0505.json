@@ -1,8 +1,8 @@
 {
   "code": "W0505",
-  "rev": 1,
+  "rev": 2,
   "message": "not applied: `{card}`; every analysis runs at 27 °C (300.15 K)",
-  "description": "`$temperature` and `$vt` read the nominal 300.15 K in every analysis; a deck's `.temp` card does not change them.",
+  "description": "Raised until 2.52.0, when `.temp` was not read and `$temperature`/`$vt` stayed at the nominal 300.15 K. Since 2.52.0 the card is applied (and `E0535` reports one that cannot be), so this code is no longer raised; it stays in the catalogue because a code is never reused.",
   "actions": [
     "To simulate another temperature, set the device model's own temperature parameter on the instance (for example `dtemp=73` for 100 °C), if the model has one.",
     "Check that the model you use reads `$temperature` at all: one that does not cannot be moved by any card."

@@ -338,9 +338,9 @@ fn resolve_pulse_defaults(net: &mut Netlist, pending: &[(usize, Vec<f64>, String
 
 /// Parse a dot-card, recording the analysis it requests. `here` locates the card for a note.
 ///
-/// A card this simulator does not read is **not applied, with a note** (`W0504`–`W0508`), never
-/// dropped in silence: a deck that says `.temp 100` and gets a 27 °C answer must say so beside
-/// the result. `.end` is the one exception — it
+/// A card this simulator does not read is **not applied, with a note** (`W0504`, `W0507`,
+/// `W0508`), never dropped in silence: a deck whose card is ignored must say so beside the
+/// result. (`.temp` was such a card, `W0505`, until 2.52.0 read it.) `.end` is the one exception — it
 /// has nothing to apply.
 fn parse_card(net: &mut Netlist, body: &str, here: &str) -> Result<(), Diagnostic> {
     let toks: Vec<&str> = body.split_whitespace().collect();
@@ -348,6 +348,37 @@ fn parse_card(net: &mut Netlist, body: &str, here: &str) -> Result<(), Diagnosti
     if name.eq_ignore_ascii_case("nodeset") {
         parse_nodeset(net, body[name.len()..].trim());
         return Ok(());
+    }
+    if name.eq_ignore_ascii_case("temp") {
+        // One temperature, in °C. SPICE reads a list as one run per temperature; this engine
+        // runs once, so a list is refused rather than reduced to one of its values.
+        let rest: Vec<&str> = toks[1..].to_vec();
+        let value = match rest.as_slice() {
+            [v] => parse_value(v),
+            _ => None,
+        };
+        return match (value, net.temp) {
+            (Some(t), None) if t > -273.15 && t.is_finite() => {
+                net.temp = Some(t);
+                Ok(())
+            }
+            (Some(_), Some(_)) => Err(Diagnostic::new(codes::E0535)
+                .arg("card", format!(".{body}"))
+                .arg("why", "the deck already set a temperature")),
+            (Some(_), None) => Err(Diagnostic::new(codes::E0535)
+                .arg("card", format!(".{body}"))
+                .arg("why", "it is at or below absolute zero")),
+            (None, _) => Err(Diagnostic::new(codes::E0535)
+                .arg("card", format!(".{body}"))
+                .arg(
+                    "why",
+                    if rest.len() > 1 {
+                        "it lists several temperatures, and a temperature sweep is not supported: run the deck once per temperature"
+                    } else {
+                        "it does not give one temperature in °C"
+                    },
+                )),
+        };
     }
     if name.eq_ignore_ascii_case("ic") {
         for (probe, value) in voltage_pairs(body[name.len()..].trim()) {
@@ -378,7 +409,6 @@ fn parse_card(net: &mut Netlist, body: &str, here: &str) -> Result<(), Diagnosti
         "end" => return Ok(()),
         _ => {
             let code = match lower.as_str() {
-                "temp" => codes::W0505,
                 "save" | "print" | "plot" | "probe" | "width" => codes::W0507,
                 "four" | "sens" | "tf" | "pz" | "disto" | "pss" | "hb" | "sp" | "pac"
                 | "pnoise" => codes::W0508,
@@ -1455,13 +1485,47 @@ R2 b 0 1k
             .collect()
     }
 
+    /// `.temp` (2.52.0): one temperature in °C is read; a list, a second card, a value at or below
+    /// absolute zero, or a missing value is an error naming the card, never a silent choice.
+    #[test]
+    fn the_temp_card_is_read_and_an_ambiguous_one_is_an_error() {
+        let base = "V1 a 0 1
+R1 a 0 1k
+";
+        let net = parse(&format!(
+            "{base}.temp 100
+"
+        ))
+        .expect("parses");
+        assert_eq!(net.temp, Some(100.0));
+        assert!(net.notes.is_empty(), "{:?}", net.notes);
+        assert_eq!(parse(base).expect("parses").temp, None);
+        for bad in [
+            ".temp 27 100",
+            ".temp 27
+.temp 100",
+            ".temp -300",
+            ".temp",
+            ".temp hot",
+        ] {
+            let err = parse(&format!(
+                "{base}{bad}
+"
+            ))
+            .expect_err(bad);
+            assert!(
+                err.to_string().contains("E0535") || format!("{err:?}").contains("E0535"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
     /// A dot-card the parser does not read is noted with a code saying what was not applied,
     /// and where — the 101-circuits report's A1 (`.temp`) and A2 (`.ic`) were silent drops.
     /// `.end` is the only card that has nothing to apply and is not noted.
     #[test]
     fn every_unread_card_is_noted_not_dropped() {
         for (card, code) in [
-            (".temp 100", "W0505"),
             (".ic V(a)=5", "W0506"), // no `.tran` in this deck
             (".step param r 1k 10k 1k", "W0504"),
             (".meas tran t1 when V(a)=0.5", "W0504"),

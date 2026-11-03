@@ -22,6 +22,37 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.52.0 - 2026-11-03
+-------------------
+**`.temp <degC>` is applied** (101-circuits A1; it was W0505, "not applied"). Every compiled model
+is built at the deck's temperature, which `$temperature` reads, and `$vt` scales as
+VT*T/300.15. The netlist's own resistors use it for 4kT in `.noise`. va-cli prints
+`temperature: 100 degC (373.15 K), from .temp` when the card is present. Without the card nothing
+changes: nominal `$vt` is exactly VT, bit for bit.
+  * Design: the temperature is a property of the *built model* (`va_codegen::CompiledModel::
+    new_at`), as the nominal one always was. That keeps every evaluation path (tree walk, tapes,
+    JIT) and the cached bias-independent setup, where temperature scaling lives, unchanged. va-cli's
+    compile cache carries the build's temperature (a cache is one build at one temperature) instead
+    of a process-wide setting, which parallel tests would share.
+  * One temperature only. A list (`.temp 27 100`, a sweep in SPICE), a second `.temp` card, a value
+    at or below absolute zero, or a missing value is E0535, which names the card. Reducing a list
+    to one of its values would give an answer at a temperature the deck did not single out.
+    W0505 is no longer raised (rev 2 says so; a code is never reused).
+  * New QSPICE gate, `circuits/resistor_noise_hot.net`: resistor_noise_va.net at `.temp 100`,
+    compiled resistors whose noise is 4k*$temperature/R, against QSPICE's own resistors.
+    1.5456e-17 V^2/Hz, error 1.1e-16. At the old fixed 300.15 K it would be 24% off. Only that
+    golden was added; gen-golden's rewrites of the 31 others (QSPICE has been updated) were
+    discarded, as in 2.47.0.
+  * A1 by hand against QSPICE (not a gate): V_BE 0.714333 V at 27 degC (QSPICE 0.714331) and
+    0.597962 V at 100 degC (QSPICE 0.597960). At -40 degC it is 0.823310 against 0.817389. That is
+    the 101-circuit npn.va model, not `.temp`: it continues exp() linearly above an argument of 40,
+    and V_BE/V_t is about 40.9 at 233 K. The report's "about 150 mV" drop is 116 mV in both
+    simulators.
+  * Figures: cargo test --workspace 1051 passed, 0 failed (+2: the parser reads one value and
+    refuses five ambiguous forms; a compiled model's $temperature/$vt and a resistor's noise follow
+    the card, with nominal $vt bit-identical); xtask validate 32/32.
+
+
 2.51.0 - 2026-11-03
 -------------------
 **W0601: a transient that goes completely still for most of its window is pointed out.** The
