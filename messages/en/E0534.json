@@ -1,0 +1,10 @@
+{
+  "code": "E0534",
+  "rev": 1,
+  "message": "`.ic` entry `{entry}` is not `V(<net>)=<value>`",
+  "description": "Each entry of a `.ic` card names one net's initial voltage. An entry that cannot be read is an error rather than skipped, because a transient started without one of its initial conditions is a different run.",
+  "actions": [
+    "Write the entry as `V(net)=value`, for example `V(out)=2.5`.",
+    "A differential `V(a,b)` or a current `I(...)` is not accepted; set those through the element's own `IC=`."
+  ]
+}

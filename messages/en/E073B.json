@@ -1,0 +1,9 @@
+{
+  "code": "E073B",
+  "rev": 1,
+  "message": "`.ic V({name})=...`: the deck has no net `{name}`",
+  "description": "A `.ic` initial condition names a net that does not exist in the circuit. It is an error rather than skipped, because the run would otherwise start from a state other than the one the deck asks for.",
+  "actions": [
+    "Check the net name. A net inside a subcircuit instance is named `<instance>.<net>`, for example `X1.mid`."
+  ]
+}

@@ -678,6 +678,9 @@ pub const E0532: Code = Code::new("E0532");
 /// subcircuits nested more than {limit} deep
 pub const E0533: Code = Code::new("E0533");
 
+/// `.ic` entry `{entry}` is not `V(<net>)=<value>`
+pub const E0534: Code = Code::new("E0534");
+
 /// Newton did not converge after {iters} iterations (residual {residual})
 pub const E0601: Code = Code::new("E0601");
 
@@ -822,6 +825,9 @@ pub const E0739: Code = Code::new("E0739");
 /// device line sets `{model}`'s parameter `{name}` to {value}, outside its declared range {range}
 pub const E073A: Code = Code::new("E073A");
 
+/// `.ic V({name})=...`: the deck has no net `{name}`
+pub const E073B: Code = Code::new("E073B");
+
 /// `pragma protect`, an encrypted model envelope
 pub const R0101: Code = Code::new("R0101");
 
@@ -942,7 +948,7 @@ pub const W0504: Code = Code::new("W0504");
 /// not applied: `{card}`; every analysis runs at 27 °C (300.15 K)
 pub const W0505: Code = Code::new("W0505");
 
-/// not applied: `{card}`; the transient starts from the operating point, or from 0 V under `UIC`
+/// not applied: `{card}`; `.ic` sets where a transient starts, and the deck has no `.tran` card
 pub const W0506: Code = Code::new("W0506");
 
 /// not applied: `{card}`; every node voltage and branch current is written
@@ -984,12 +990,12 @@ pub const ALL: &[Code] = &[
     E0402, E0403, E0404, E0405, E0406, E0407, E0408, E0409, E0410, E0411, E0412, E0413, E0501,
     E0502, E0503, E0504, E0505, E0506, E0507, E0508, E0509, E0510, E0511, E0512, E0513, E0514,
     E0515, E0516, E0517, E0518, E0519, E0520, E0521, E0522, E0523, E0524, E0525, E0526, E0527,
-    E0528, E0529, E0530, E0531, E0532, E0533, E0601, E0602, E0603, E0604, E0605, E0606, E0607,
-    E0608, E0701, E0702, E0703, E0704, E0705, E0706, E0707, E0708, E0709, E0710, E0711, E0712,
-    E0713, E0714, E0715, E0716, E0717, E0718, E0719, E0720, E0721, E0722, E0723, E0724, E0725,
-    E0726, E0727, E0728, E0729, E0730, E0731, E0732, E0733, E0734, E0735, E0736, E0737, E0738,
-    E0739, E073A, R0101, R0201, R0202, R0203, R0204, R0301, R0302, R0303, R0304, R0305, R0306,
-    R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405, R0406, R0407, R0408, R0409,
-    R0410, R0411, W0101, W0102, W0103, W0104, W0301, W0302, W0401, W0402, W0403, W0501, W0502,
-    W0503, W0504, W0505, W0506, W0507, W0508, W0509, W050A, W050B, W050C, W0701,
+    E0528, E0529, E0530, E0531, E0532, E0533, E0534, E0601, E0602, E0603, E0604, E0605, E0606,
+    E0607, E0608, E0701, E0702, E0703, E0704, E0705, E0706, E0707, E0708, E0709, E0710, E0711,
+    E0712, E0713, E0714, E0715, E0716, E0717, E0718, E0719, E0720, E0721, E0722, E0723, E0724,
+    E0725, E0726, E0727, E0728, E0729, E0730, E0731, E0732, E0733, E0734, E0735, E0736, E0737,
+    E0738, E0739, E073A, E073B, R0101, R0201, R0202, R0203, R0204, R0301, R0302, R0303, R0304,
+    R0305, R0306, R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405, R0406, R0407,
+    R0408, R0409, R0410, R0411, W0101, W0102, W0103, W0104, W0301, W0302, W0401, W0402, W0403,
+    W0501, W0502, W0503, W0504, W0505, W0506, W0507, W0508, W0509, W050A, W050B, W050C, W0701,
 ];

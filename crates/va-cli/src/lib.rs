@@ -2077,17 +2077,33 @@ impl ModelInstance for NodesetHold {
 /// A nodeset naming a net the deck does not have: a typo would otherwise be a hint silently
 /// dropped, and the cost it was written to save silently paid.
 fn nodeset_holds(net: &Netlist, dim: usize) -> Result<Vec<NodesetHold>> {
+    resolve_holds(net, &net.nodesets, dim, va_diag::codes::E0717)
+}
+
+/// The deck's `.ic` cards (2.46.0) as holds, on the same terms as [`nodeset_holds`]: one per
+/// named net, the last value written winning, ground skipped, an unknown name an error
+/// (`E073B`) — a typo would otherwise start the run from the wrong state without a word.
+fn ic_holds(net: &Netlist, dim: usize) -> Result<Vec<NodesetHold>> {
+    resolve_holds(net, &net.ics, dim, va_diag::codes::E073B)
+}
+
+/// `(net, value)` pairs as holds on the nets' unknowns; `missing` is the error for a name the
+/// deck does not have.
+fn resolve_holds(
+    net: &Netlist,
+    entries: &[(String, f64)],
+    dim: usize,
+    missing: va_diag::Code,
+) -> Result<Vec<NodesetHold>> {
     let mut holds: Vec<NodesetHold> = Vec::new();
-    for (name, value) in &net.nodesets {
+    for (name, value) in entries {
         let Some(&i) = net.nodes.get(name).or_else(|| {
             net.nodes
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
                 .map(|(_, i)| i)
         }) else {
-            return Err(va_diag::Diagnostic::new(va_diag::codes::E0717)
-                .arg("name", name)
-                .into());
+            return Err(va_diag::Diagnostic::new(missing).arg("name", name).into());
         };
         // A net with no unknown behind it (ground) has nothing to hold.
         if i >= dim {
@@ -2634,10 +2650,9 @@ fn waveform_value(waveform: &va_netlist::Waveform, t: f64) -> f64 {
 /// Build every device instance and integrate the transient response over the deck's
 /// `.tran <tstep> <tstop>` window.
 ///
-/// Starts from the zero vector unless an element carries a SPICE `IC=` (see the `dev.ic`
-/// handling below, added 2026-08-31); there is no `.ic` card or circuit-wide `UIC` flag (this
-/// module's doc
-/// comment). Every deck takes the same path ([`va_transient::integrator::run`]) whether or not
+/// Starts from the DC operating point, or under `UIC` from the zero vector plus the deck's
+/// `.ic` values and each element's `IC=` ([`initial_solution`]); without `UIC`, `.ic` nets are
+/// held through that operating point ([`operating_point_ic`]). Every deck takes the same path ([`va_transient::integrator::run`]) whether or not
 /// it contains a time-varying source: a `SIN` source is a [`WaveformSource`], which reads the
 /// time from the analysis context like any other analysis-dependent model. `pub` so
 /// `va-harness` can get the numeric [`Waveform`] back directly (§ golden comparison), the same
@@ -2771,8 +2786,9 @@ fn solve_transient_impl(
     // it — and halving the timestep makes the required current *larger*, so the step controller
     // can only shrink until it underflows. Every CMC MOSFET in `external/code` failed at
     // `t = 0` this way, and none of them could ever have run.
+    let ics = ic_holds(net, dim)?;
     let x0 = if net.tran_uic {
-        initial_solution(net, dim, &currents)
+        initial_solution(net, dim, &currents, &ics)
     } else {
         // The sources read their own `t = 0` value here (a waveform's DC value *is* its value
         // at zero — see `va_netlist::parser`), so this is the operating point the run actually
@@ -2784,7 +2800,7 @@ fn solve_transient_impl(
             transient_seed: true,
             ..newton_cfg(solver)
         };
-        let (op, _) = operating_point_nodeset(&refs, dim, seed_cfg, &holds)
+        let (op, _) = operating_point_ic(&refs, dim, seed_cfg, &holds, &ics)
             .map_err(|e| name_non_finite_row(e.into(), &quantities))
             .context(
                 "the operating-point solve that precedes a transient run failed; add `UIC` \
@@ -2806,6 +2822,44 @@ fn solve_transient_impl(
     }
     .map_err(|e| name_non_finite_row(e.into(), &quantities))
     .context("transient integration failed")
+}
+
+/// The operating point a transient starts from when the deck has `.ic` cards and no `UIC`
+/// (2.46.0): SPICE's rule, the circuit solved with each `.ic` net **held** at its value, and the
+/// hold *not* released before integration starts — the run begins at exactly the state the
+/// deck asked for, consistent with it everywhere else, and the held nets move freely from the
+/// first step on. Unlike a nodeset, the result is not an operating point of the free circuit;
+/// that is what an initial condition means.
+///
+/// The `.ic` holds are folded into the circuit and the deck's nodesets applied to *that* with
+/// [`operating_point_nodeset`]'s hold-then-release, so a net named by both keeps its `.ic`
+/// value. With no `.ic` it is exactly [`operating_point_nodeset`].
+///
+/// # Errors
+///
+/// As [`operating_point_nodeset`].
+fn operating_point_ic(
+    refs: &[&dyn ModelInstance],
+    dim: usize,
+    cfg: NewtonConfig,
+    nodesets: &[NodesetHold],
+    ics: &[NodesetHold],
+) -> std::result::Result<(va_core::dc::OperatingPoint, va_core::dc::AboveValues), va_core::CoreError>
+{
+    if ics.is_empty() {
+        return operating_point_nodeset(refs, dim, cfg, nodesets);
+    }
+    let mut held: Vec<&dyn ModelInstance> = refs.to_vec();
+    held.extend(ics.iter().map(|h| h as &dyn ModelInstance));
+    let free: Vec<NodesetHold> = nodesets
+        .iter()
+        .filter(|n| !ics.iter().any(|c| c.unknown == n.unknown))
+        .map(|n| NodesetHold {
+            unknown: n.unknown,
+            value: n.value,
+        })
+        .collect();
+    operating_point_nodeset(&held, dim, cfg, &free)
 }
 
 /// The transient run's initial solution vector: zero everywhere, then each reactive element's
@@ -2831,8 +2885,18 @@ fn solve_transient_impl(
 /// case SPICE decks overwhelmingly write, and the only one in this project's zoo — is exact.
 /// Nothing here reconciles two conditions that contradict each other; the last one written
 /// wins, rather than the conflict being reported.
-fn initial_solution(net: &Netlist, dim: usize, currents: &[(String, usize)]) -> Vec<f64> {
+fn initial_solution(
+    net: &Netlist,
+    dim: usize,
+    currents: &[(String, usize)],
+    ics: &[NodesetHold],
+) -> Vec<f64> {
     let mut x0 = vec![0.0; dim];
+    // `.ic` node voltages first (2.46.0), so an element's own `IC=` — applied next, and read
+    // relative to its `n` terminal — wins where both speak, as in SPICE.
+    for h in ics {
+        x0[h.unknown[0]] = h.value;
+    }
     for dev in &net.devices {
         let Some(ic) = dev.ic else { continue };
         // An inductor's state is its *current*, which lives on its own branch row rather than
@@ -6327,6 +6391,76 @@ R2 out gnd 10k
     /// from rest with no way to say otherwise, was a trap rather than a simplification.
     ///
     /// The two readings differ by the whole 5 V swing, so nothing here turns on a tolerance.
+    /// `.ic` (2.46.0, the 101-circuits report's A2), both ways SPICE applies it, on a two-stage
+    /// RC whose answer is known independently (scipy `solve_ivp`, rtol 1e-10: at 1 ms
+    /// V(c) = 2.975035, V(d) = 2.094845 from V(c) = 0, V(d) = 2).
+    ///
+    /// - Without `UIC` the operating point the run starts from has the `.ic` nets held: the
+    ///   free circuit's operating point would put both capacitors at 5 V.
+    /// - With `UIC` the values seed the start vector, and an element's own `IC=` wins where
+    ///   both name the same net.
+    /// - A `.ic` naming no net of the deck is an error, not a hint dropped.
+    #[test]
+    fn an_ic_card_sets_where_a_transient_starts() {
+        let deck = |extra: &str, uic: &str| {
+            format!(
+                "V1 a gnd DC 5
+R1 a c 1k
+C1 c gnd 1u{extra}
+R2 c d 1k
+C2 d gnd 1u
+                 .ic V(c)=0 V(d)=2
+.tran 10u 1m{uic}
+.end
+"
+            )
+        };
+        let ends = |deck: &str| -> (Vec<f64>, Vec<f64>) {
+            let net = va_netlist::parser::parse(deck).expect("parses");
+            let w = solve_transient(&net, &[], Integration::Trapezoidal).expect("integrates");
+            let at = |n: &str| net.node_order.iter().position(|k| k == n).expect("a net");
+            let (c, d) = (at("c"), at("d"));
+            let first = w.x.first().expect("a point");
+            let last = w.x.last().expect("a point");
+            (vec![first[c], first[d]], vec![last[c], last[d]])
+        };
+        for uic in ["", " UIC"] {
+            let (first, last) = ends(&deck("", uic));
+            assert!(first[0].abs() < 1e-9, "{uic}: V(c) starts at {}", first[0]);
+            assert!(
+                (first[1] - 2.0).abs() < 1e-9,
+                "{uic}: V(d) starts at {}",
+                first[1]
+            );
+            for (got, want) in last.iter().zip([2.975035, 2.094845]) {
+                assert!(
+                    ((got - want) / want).abs() < 1e-4,
+                    "{uic}: at 1 ms {got} against the reference {want}"
+                );
+            }
+        }
+        // An element's `IC=` is applied after `.ic` under `UIC`, so it wins.
+        let (first, _) = ends(&deck(" IC=1", " UIC"));
+        assert!(
+            (first[0] - 1.0).abs() < 1e-12,
+            "V(c) starts at {}",
+            first[0]
+        );
+
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 5
+R1 a c 1k
+C1 c gnd 1u
+.ic V(cc)=0
+.tran 10u 1m
+.end
+",
+        )
+        .expect("parses");
+        let err = solve_transient(&net, &[], Integration::Trapezoidal).expect_err("a typo");
+        assert!(format!("{err:#}").contains("no net `cc`"), "{err:#}");
+    }
+
     #[test]
     fn a_transient_starts_from_the_operating_point_unless_the_deck_says_uic() {
         let deck = |uic: &str| {

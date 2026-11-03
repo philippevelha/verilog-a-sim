@@ -22,6 +22,26 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.46.0 - 2026-11-03
+-------------------
+**`.ic V(net)=value` is implemented** (101-circuits report, A2), with SPICE's two meanings:
+  * under `.tran ... UIC` the values seed the start vector; an element's own `IC=` is applied
+    after them, so it wins where both name a net;
+  * without `UIC` the operating point the run starts from is solved with each `.ic` net held at
+    its value (the 2.43.0 nodeset hold, 1e10 S) and the hold is *not* released, so t = 0 is the
+    asked-for state, consistent everywhere else. Nodesets are still applied on top
+    (hold-then-release), except on a net `.ic` also names.
+  * An entry that does not read is an error (E0534), not skipped: unlike a nodeset, a dropped
+    initial condition changes the run. A net the deck does not have is E073B. Only `V(net)` is
+    accepted: no differential `V(a,b)`, no currents.
+  * W0506 (rev 2) now means only "deck has `.ic` and no `.tran`": `.ic` does not constrain an
+    `.op`/`.dc`, as in SPICE.
+  * Checked: a two-stage RC from V(c)=0, V(d)=2 matches scipy solve_ivp to 8e-6 at 1 ms, with
+    and without `UIC` (new test); the A2 reproducer starts at 5 V and decays with tau = 1 ms.
+    Decks without `.ic` take the old calls unchanged.
+  * cargo test --workspace: 1042 passed, 0 failed; clippy clean; xtask validate 28/28.
+
+
 2.45.0 - 2026-11-03
 -------------------
 **The netlist parser no longer drops a card in silence.** First item of the 101-circuits report

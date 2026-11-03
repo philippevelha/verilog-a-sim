@@ -157,7 +157,8 @@ fn parse_with_base(deck: &str, base: Option<&std::path::Path>) -> Result<Netlist
             None => format!("line {line_no}"),
         };
         if let Some(stripped) = line.strip_prefix('.') {
-            parse_card(&mut net, stripped, &here);
+            parse_card(&mut net, stripped, &here)
+                .map_err(|d| NetlistError::at_line(line_no, src.origin.as_deref(), d))?;
             continue;
         }
         let device = parse_device(
@@ -175,6 +176,11 @@ fn parse_with_base(deck: &str, base: Option<&std::path::Path>) -> Result<Netlist
 
     resolve_pulse_defaults(&mut net, &pending_pulses);
     note_unapplied_ics(&mut net);
+    // A `.ic` card is noted (W0506) as it is read; it applies after all when the deck turns
+    // out to have a `.tran` card, which may come later in the deck.
+    if net.tran.is_some() {
+        net.notes.retain(|n| n.code() != codes::W0506);
+    }
     Ok(net)
 }
 
@@ -331,15 +337,34 @@ fn resolve_pulse_defaults(net: &mut Netlist, pending: &[(usize, Vec<f64>, String
 /// Parse a dot-card, recording the analysis it requests. `here` locates the card for a note.
 ///
 /// A card this simulator does not read is **not applied, with a note** (`W0504`–`W0508`), never
-/// dropped in silence: a deck that says `.temp 100` or `.ic V(c)=5` and gets a 27 °C answer, or a
-/// capacitor starting at 0 V, must say so beside the result. `.end` is the one exception — it
+/// dropped in silence: a deck that says `.temp 100` and gets a 27 °C answer must say so beside
+/// the result. `.end` is the one exception — it
 /// has nothing to apply.
-fn parse_card(net: &mut Netlist, body: &str, here: &str) {
+fn parse_card(net: &mut Netlist, body: &str, here: &str) -> Result<(), Diagnostic> {
     let toks: Vec<&str> = body.split_whitespace().collect();
     let name = toks.first().copied().unwrap_or("");
     if name.eq_ignore_ascii_case("nodeset") {
         parse_nodeset(net, body[name.len()..].trim());
-        return;
+        return Ok(());
+    }
+    if name.eq_ignore_ascii_case("ic") {
+        for (probe, value) in voltage_pairs(body[name.len()..].trim()) {
+            match (parse_voltage_probe(&probe), parse_value(&value)) {
+                (Some(node), Some(v)) => net.ics.push((node, v)),
+                // Unlike a nodeset, a dropped initial condition changes the answer.
+                _ => {
+                    return Err(
+                        Diagnostic::new(codes::E0534).arg("entry", format!("{probe}={value}"))
+                    )
+                }
+            }
+        }
+        net.notes.push(
+            Diagnostic::new(codes::W0506)
+                .arg("card", format!(".{body}"))
+                .at(here),
+        );
+        return Ok(());
     }
     let lower = name.to_ascii_lowercase();
     let card = match lower.as_str() {
@@ -348,11 +373,10 @@ fn parse_card(net: &mut Netlist, body: &str, here: &str) {
         "tran" => AnalysisCard::Tran,
         "ac" => AnalysisCard::Ac,
         "noise" => AnalysisCard::Noise,
-        "end" => return,
+        "end" => return Ok(()),
         _ => {
             let code = match lower.as_str() {
                 "temp" => codes::W0505,
-                "ic" => codes::W0506,
                 "save" | "print" | "plot" | "probe" | "width" => codes::W0507,
                 "four" | "sens" | "tf" | "pz" | "disto" | "pss" | "hb" | "sp" | "pac"
                 | "pnoise" => codes::W0508,
@@ -363,7 +387,7 @@ fn parse_card(net: &mut Netlist, body: &str, here: &str) {
                     .arg("card", format!(".{body}"))
                     .at(here),
             );
-            return;
+            return Ok(());
         }
     };
     // The first analysis card wins.
@@ -486,6 +510,21 @@ fn parse_card(net: &mut Netlist, body: &str, here: &str) {
             }
         }
     }
+    Ok(())
+}
+
+/// Split a `V(a)=1 V(b) = 2 ...` list into `(probe, value)` token pairs, spaces around `=`
+/// allowed. A token with no `=` comes back with an empty value, for the caller to reject.
+fn voltage_pairs(rest: &str) -> Vec<(String, String)> {
+    let joined: String = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = joined.replace(" =", "=").replace("= ", "=");
+    joined
+        .split_whitespace()
+        .map(|pair| match pair.split_once('=') {
+            Some((p, v)) => (p.to_string(), v.to_string()),
+            None => (pair.to_string(), String::new()),
+        })
+        .collect()
 }
 
 /// Unwrap a `V(<node>)` output probe into the bare node name, case-insensitively on the `V`.
@@ -1418,7 +1457,7 @@ R2 b 0 1k
     fn every_unread_card_is_noted_not_dropped() {
         for (card, code) in [
             (".temp 100", "W0505"),
-            (".ic V(a)=5", "W0506"),
+            (".ic V(a)=5", "W0506"), // no `.tran` in this deck
             (".step param r 1k 10k 1k", "W0504"),
             (".meas tran t1 when V(a)=0.5", "W0504"),
             (".param r=1k", "W0504"),
@@ -1437,6 +1476,64 @@ R2 b 0 1k
             assert!(note.to_string().contains(card), "{card}: {note}");
         }
         assert!(note_codes("V1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n").is_empty());
+    }
+
+    /// `.ic` entries are read with spaces around `=` allowed; one that does not read is an
+    /// error naming it (a skipped initial condition would change the run); and the card is
+    /// noted as not applied only when the deck has no `.tran` card, wherever that card sits.
+    #[test]
+    fn ic_cards_are_read_and_a_malformed_entry_is_an_error() {
+        let net = parse(
+            "V1 a 0 DC 1
+R1 a b 1k
+C1 b 0 1n
+.ic V(b) = 2 v(a)=1m
+.tran 1n 1u
+.end
+",
+        )
+        .expect("parses");
+        assert_eq!(
+            net.ics,
+            vec![("b".to_string(), 2.0), ("a".to_string(), 1e-3)]
+        );
+        assert!(net.notes.is_empty(), "{:?}", net.notes);
+        // `.tran` before or after the `.ic`: no note either way; no `.tran`: W0506.
+        assert!(note_codes(
+            "V1 a 0 DC 1
+R1 a 0 1k
+.tran 1n 1u
+.ic V(a)=1
+.end
+"
+        )
+        .is_empty());
+        assert_eq!(
+            note_codes(
+                "V1 a 0 DC 1
+R1 a 0 1k
+.ic V(a)=1
+.op
+.end
+"
+            ),
+            ["W0506"]
+        );
+        for bad in [".ic V(a)", ".ic V(a)=x", ".ic V(a,b)=1", ".ic I(V1)=1"] {
+            let err = parse(&format!(
+                "V1 a 0 DC 1
+R1 a 0 1k
+{bad}
+.tran 1n 1u
+.end
+"
+            ))
+            .expect_err(bad);
+            let NetlistError::Parse { line, diag } = err else {
+                panic!("{bad}: not a parse error");
+            };
+            assert_eq!((line, diag.code().as_str()), (3, "E0534"), "{bad}");
+        }
     }
 
     /// `.tran`'s `tstart` and `tmax` are noted when present; `UIC` among them is not a field,

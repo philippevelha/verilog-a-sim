@@ -131,6 +131,12 @@ pub struct Netlist {
     /// which one (1.30.0 used them only as Newton's starting point). Names are resolved by
     /// `va-cli` (a name that is not a net of the deck is an error there).
     pub nodesets: Vec<(String, f64)>,
+    /// `.ic V(<net>)=<value> ...` initial conditions, in deck order (2.46.0). They apply to a
+    /// transient only, as in SPICE: under `UIC` they seed the start vector (an element's own
+    /// `IC=` is applied after them, so it wins where both speak); without `UIC` the operating
+    /// point the run starts from is solved with each named net *held* at its value, and the
+    /// hold is dropped once integration begins. Names are resolved by `va-cli`.
+    pub ics: Vec<(String, f64)>,
 }
 
 /// A `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` card (T5.2): sweep the

@@ -1,10 +1,10 @@
 {
   "code": "W0506",
-  "rev": 1,
-  "message": "not applied: `{card}`; the transient starts from the operating point, or from 0 V under `UIC`",
-  "description": "A `.ic` card's node voltages are not used. Without `UIC` the transient starts from the DC operating point; with `UIC` it starts from the zero vector plus each element's own `IC=`.",
+  "rev": 2,
+  "message": "not applied: `{card}`; `.ic` sets where a transient starts, and the deck has no `.tran` card",
+  "description": "Initial conditions apply to a transient run only, as in SPICE: an operating point or a sweep is the circuit's own steady state and is not constrained by them. A deck with `.ic` and no `.tran` card therefore does not use them.",
   "actions": [
-    "Put the initial voltage on the capacitor at that node as `IC=<volts>` and add `UIC` to the `.tran` card.",
-    "To choose between DC states without fixing the start, use `.nodeset V(node)=<volts>` instead."
+    "Add a `.tran` card if the run should start from these values.",
+    "To choose between DC states instead, use `.nodeset V(node)=<volts>`."
   ]
 }
