@@ -173,6 +173,9 @@ fn print_usage() {
          --newton-reltol <x>     Each transient step's Newton convergence tolerance.
                                  Default 1e-9 (strict). Looser = fewer iterations;
                                  same caveat.
+         --stall-steps <n>       Transient stall watchdog: stop with E0609 when n
+                                 step attempts in a row advance time by less than
+                                 one tstep. Default 10000; 0 turns it off.
          --bypass                Device bypass in a transient run (SPICE's BYPASS): a
                                  device whose stamps depend only on its own unknowns
                                  reuses its last evaluation while they move less than
@@ -261,6 +264,19 @@ fn cmd_sim(args: &[String]) -> Result<()> {
             va_transient::integrator::NEWTON_RELTOL_DEFAULT,
         )?,
     );
+    // `--stall-steps <n>`: the transient stall watchdog (`va_cli::set_stall_attempts`); 0 is off.
+    if let Some(v) = parse_flag(args, "--stall-steps") {
+        let n: usize = v.parse().map_err(|_| {
+            va_diag::Diagnostic::new(va_diag::codes::E0703)
+                .arg("option", "--stall-steps")
+                .arg("value", &v)
+                .arg(
+                    "expected",
+                    "a non-negative integer (0 turns the watchdog off)",
+                )
+        })?;
+        va_cli::set_stall_attempts(Some(n).filter(|&n| n > 0));
+    }
     // `--bypass` / `--bypass-reltol <x>`: device bypass (`va_cli::set_bypass`), transient only.
     let bypass_reltol = parse_flag(args, "--bypass-reltol");
     if bypass_reltol.is_some() || args.iter().any(|a| a == "--bypass") {

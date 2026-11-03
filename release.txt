@@ -22,6 +22,39 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.48.0 - 2026-11-03
+-------------------
+**Transient stall watchdog: E0609** (101-circuits report, D12/D13/D14; they ran for hours with
+no message). Every block of 10 000 consecutive step attempts, accepted or rejected, must advance
+time by at least one `.tran` step, or by the smallest `bound_step` a model asked for in that
+block if that is smaller. Otherwise the run stops with E0609, which says where it stalled, how
+far the block got, and the step it was trying.
+  * Why the hangs never reached E0605: the controller accepts a step around 1e-14 s, grows,
+    rejects, and shrinks back. Each step *is* accepted, so the underflow check never fires, and a
+    30 µs window would take ~1e9 steps. D12 sat at h = 3.2e-14 s (floor 2e-14), D14 at 1.65e-14 s,
+    and D13 at ~5e-12 s.
+  * Counting attempts, not seconds, keeps the verdict deterministic: the same run stops at the same
+    point on every machine and at any load. The cost is that wall time to the verdict depends on
+    how expensive an attempt is. Measured on this machine (loaded): D13 14 s, D14 83 s, D12 390 s.
+    D12's stall begins just after the first block, so it takes a second block to trip.
+  * Not a hang, and not stopped: D5 (LDO) finishes in 192 s. D10 (boost) still advances ~1e-4 s
+    per 10 000 attempts over a 6 ms window and was still running at 600 s. It is slow, not stalled,
+    and the watchdog leaves it alone on purpose.
+  * `va-cli sim --stall-steps <n>` changes the block size, and `--stall-steps 0` turns it off
+    (`TranConfig::stall_attempts`, `STALL_ATTEMPTS_DEFAULT`). **Limitation:** a run that genuinely
+    needs more than 10 000 steps per `tstep` for a sustained stretch is stopped too. The message
+    names the flag.
+  * Checked for false stops: all 103 transient decks under circuits/ were run through a probe
+    build that logs any block within 10x of the limit, capped at 45 s per deck. 81 ran to the end
+    and 22 slow ones (ISCAS, bubble cloud, HH, SNN transistor) were checked over their first 45 s
+    only. None came within 10x. The watchdog only raises an error, so a
+    run that does not trip it is bit-identical to 2.47.0.
+  * Figures: cargo test --workspace 1046 passed, 0 failed (+2: with a 100-attempt block the
+    watchdog stops a 7.3 MHz-driven RC run on a 1 µs tstep, which runs to the end unwatched; and it
+    honours a model's bound_step);
+    xtask validate 31/31.
+
+
 2.47.0 - 2026-11-03
 -------------------
 **Independent current sources: `I` lines** (101-circuits report, A3; was E0513). The syntax is

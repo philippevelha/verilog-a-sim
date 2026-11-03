@@ -18,6 +18,20 @@ pub enum TransientError {
     /// The timestep was cut below the minimum without meeting the LTE bound.
     #[error("timestep underflow at t={t:e}")]
     TimestepUnderflow { t: f64 },
+    /// The stall watchdog ([`integrator::TranConfig::stall_attempts`]): `attempts` consecutive
+    /// step attempts advanced time by only `advanced` seconds, less than `resolution` (the
+    /// card's `tstep`, or a smaller `bound_step` a model asked for). `t` is where the run was
+    /// and `h` the step it was trying.
+    #[error(
+        "transient stalled at t={t:e}: {attempts} step attempts advanced {advanced:e} s,          less than one step of {resolution:e} s (last step tried {h:e} s)"
+    )]
+    Stalled {
+        t: f64,
+        h: f64,
+        attempts: usize,
+        advanced: f64,
+        resolution: f64,
+    },
     /// A per-step Newton solve failed.
     #[error(transparent)]
     Core(#[from] va_core::CoreError),

@@ -156,7 +156,28 @@ pub struct TranConfig {
     /// an accepted timepoint, as [`Self::on_task`]'s display tasks (LRM §9.5.9). `None` writes
     /// nothing. Since 2.12.0.
     pub on_file: Option<FileHook>,
+    /// The **stall watchdog** (2.48.0): every block of this many consecutive step attempts
+    /// (accepted or rejected) must advance time by at least one [`Self::tstep`] -- or by the
+    /// smallest `bound_step` a model asked for in that block, if smaller -- or the run stops with
+    /// [`TransientError::Stalled`]. `None` turns it off. [`STALL_ATTEMPTS_DEFAULT`] unless a
+    /// caller says otherwise (`va-cli sim --stall-steps`).
+    ///
+    /// Why it exists: a run whose step controller settles at a step far below anything the
+    /// card asked for -- accept at a tiny step, grow, reject, shrink back -- never reaches
+    /// [`TransientError::TimestepUnderflow`], because each step *is* accepted, and progresses
+    /// at 1e-14 s a step through a window of microseconds: a hang, with no message. Measured on
+    /// the 101-circuit reproducers (`docs/bugs011126.txt`, D12/D13/D14). Counting attempts, not
+    /// seconds, keeps the verdict deterministic: the same run stops at the same point on every
+    /// machine. **Limitation:** a run that genuinely needs ten thousand steps per `tstep` for a
+    /// sustained stretch is stopped too; widen or disable it for that run.
+    pub stall_attempts: Option<usize>,
 }
+
+/// [`TranConfig::stall_attempts`]'s default: ten thousand step attempts without advancing one
+/// `tstep`. A sharp edge resolved down to `tstep_min` (`tstep`·1e-6 in `va-cli`) takes some tens
+/// of halvings and a few hundred steps, so this is two orders of magnitude above what a
+/// resolvable event costs.
+pub const STALL_ATTEMPTS_DEFAULT: usize = 10_000;
 
 /// [`TranConfig::on_task`]'s callback: the task, its text, and the time it ran at.
 pub type TaskHook = fn(va_abi::TaskKind, &str, f64);
@@ -1816,8 +1837,35 @@ fn integrate(
     let mut history: Vec<(f64, Vec<f64>)> = Vec::new();
     let history_cap = divided_difference_history(Method::Trapezoidal);
 
+    // The stall watchdog (`TranConfig::stall_attempts`): attempts so far, and where the current
+    // block of attempts started -- its first attempt number and time, and the smallest
+    // `bound_step` seen in it.
+    let mut attempts = 0usize;
+    let mut block_start = (0usize, t);
+    let mut block_bound = f64::INFINITY;
     while t < cfg.tstop && finish.is_none() {
         loop {
+            attempts += 1;
+            if let Some(bound) = step_bound {
+                block_bound = block_bound.min(bound);
+            }
+            if let Some(limit) = cfg.stall_attempts {
+                if attempts - block_start.0 >= limit.max(1) {
+                    let advanced = t - block_start.1;
+                    let resolution = cfg.tstep.min(block_bound);
+                    if advanced < resolution {
+                        return Err(TransientError::Stalled {
+                            t,
+                            h,
+                            attempts: limit,
+                            advanced,
+                            resolution,
+                        });
+                    }
+                    block_start = (attempts, t);
+                    block_bound = f64::INFINITY;
+                }
+            }
             // The LTE controller owns `h`; a model's `bound_step` caps how far this particular
             // step may land without shrinking `h` itself, so the controller can still grow back
             // freely once the bound relaxes.
@@ -2922,6 +2970,7 @@ mod tests {
             bypass: None,
             on_task: None,
             on_file: None,
+            stall_attempts: Some(STALL_ATTEMPTS_DEFAULT),
         }
     }
 
@@ -3962,6 +4011,85 @@ mod tests {
         );
     }
 
+    /// **The stall watchdog** (2.48.0). An RC filter driven at 7.3 MHz with a 1 µs `tstep`: the
+    /// error controller needs nanosecond steps throughout, so a block of 100 attempts advances
+    /// a fraction of one `tstep`, which is the signature the watchdog stops on. The same run with
+    /// the watchdog off finishes, so the stop is the watchdog's verdict, not another failure.
+    #[test]
+    fn the_stall_watchdog_stops_a_run_that_never_advances_one_tstep() {
+        let src = SinSource {
+            terminals: [0, va_abi::reference::GROUND, 2],
+            amplitude: 1.0,
+            // Not commensurate with the 1 µs step: at 10 MHz a 1 µs step samples the source at
+            // its zeros every time, and the controller, seeing a flat line, never shrinks.
+            freq: 7.3e6,
+        };
+        let r = va_abi::reference::Resistor::new(0, 1, 1000.0);
+        let c = va_abi::reference::Capacitor::new(1, va_abi::reference::GROUND, 1e-11);
+        let insts: [&dyn ModelInstance; 3] = [&src, &r, &c];
+
+        let mut cfg = default_cfg(2e-6, 1e-6, Method::Trapezoidal);
+        cfg.stall_attempts = None;
+        let free = run(&insts, 3, vec![0.0; 3], cfg).expect("runs to the end unwatched");
+        assert_eq!(free.t.last().copied(), Some(2e-6));
+        assert!(free.t.len() > 200, "only {} points", free.t.len());
+
+        cfg.stall_attempts = Some(100);
+        match run(&insts, 3, vec![0.0; 3], cfg) {
+            Err(TransientError::Stalled {
+                t,
+                attempts,
+                advanced,
+                resolution,
+                ..
+            }) => {
+                assert_eq!(attempts, 100);
+                assert_eq!(resolution, 1e-6);
+                assert!(advanced < resolution, "advanced {advanced:e}");
+                assert!(t > 0.0 && t < 1e-6, "stopped at {t:e}");
+            }
+            other => panic!("expected Stalled, got {other:?}"),
+        }
+    }
+
+    /// A model's own `bound_step` is honoured by the watchdog: small steps it asked for are
+    /// not a stall. 1 ns bounds over a 1 µs `tstep` is a thousand steps per `tstep`, ten times
+    /// the 100-attempt block, and the run still finishes.
+    #[test]
+    fn the_stall_watchdog_measures_against_a_requested_bound_step() {
+        struct Bounded {
+            terminals: [usize; 2],
+        }
+
+        impl ModelInstance for Bounded {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn load(
+                &self,
+                x: &[f64],
+                ctx: &AnalysisCtx,
+                st: &mut va_abi::ModelState,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
+                va_abi::reference::Resistor::new(self.terminals[0], self.terminals[1], 1000.0)
+                    .load(x, ctx, st, sink);
+                sink.bound_step(1e-9);
+            }
+        }
+
+        let src = va_abi::reference::VSource::new(0, va_abi::reference::GROUND, 1, 1.0);
+        let r = Bounded {
+            terminals: [0, va_abi::reference::GROUND],
+        };
+        let insts: [&dyn ModelInstance; 2] = [&src, &r];
+        let mut cfg = default_cfg(1e-6, 1e-6, Method::BackwardEuler);
+        cfg.stall_attempts = Some(100);
+        let wf = run(&insts, 2, vec![0.0, 0.0], cfg).expect("bounded steps are not a stall");
+        assert_eq!(wf.t.last().copied(), Some(1e-6));
+        assert!(wf.t.len() > 900, "only {} points", wf.t.len());
+    }
+
     #[test]
     fn nonconvergence_propagates_as_a_core_error() {
         // Sanity: the `?`-propagation path from `linsolve`/Newton failures into
@@ -4089,6 +4217,7 @@ mod tests {
             bypass: None,
             on_task: None,
             on_file: None,
+            stall_attempts: Some(STALL_ATTEMPTS_DEFAULT),
         };
         let mut events = crate::events::EventQueue::new();
         events.push_watch(3, op.x[3]); // stage 1's collector, crossing its own DC bias voltage

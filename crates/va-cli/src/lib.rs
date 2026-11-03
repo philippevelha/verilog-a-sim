@@ -210,6 +210,23 @@ fn tran_newton_reltol() -> f64 {
     f64::from_bits(NEWTON_RELTOL.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// Set the transient **stall watchdog** for every `.tran` this process runs from here on: the
+/// run stops with `E0609` once this many consecutive step attempts fail to advance time by one
+/// `tstep` (`va_transient::integrator::TranConfig::stall_attempts`). `None` turns it off.
+/// Default [`va_transient::integrator::STALL_ATTEMPTS_DEFAULT`]. `va-cli sim --stall-steps`
+/// calls it (`0` meaning off).
+pub fn set_stall_attempts(attempts: Option<usize>) {
+    STALL_ATTEMPTS.store(attempts.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// [`set_stall_attempts`]'s value; `0` is off.
+static STALL_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(va_transient::integrator::STALL_ATTEMPTS_DEFAULT);
+
+fn tran_stall_attempts() -> Option<usize> {
+    Some(STALL_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed)).filter(|&n| n > 0)
+}
+
 /// Switch on (or off) the `[logfull]` trace for every DC Newton solve this process runs from
 /// here on: per iteration, the assembly time, linear-solve time, line-search trial time,
 /// residual and largest applied step; per `gmin` stage, the iteration count and totals (see
@@ -2205,6 +2222,18 @@ pub fn numerical_diagnostic(e: &(dyn std::error::Error + 'static)) -> Option<va_
             T::TimestepUnderflow { t } => {
                 Diagnostic::new(codes::E0605).arg("time", format!("{t:e}"))
             }
+            T::Stalled {
+                t,
+                h,
+                attempts,
+                advanced,
+                resolution,
+            } => Diagnostic::new(codes::E0609)
+                .arg("time", format!("{t:e}"))
+                .arg("attempts", attempts)
+                .arg("advanced", format!("{advanced:e}"))
+                .arg("resolution", format!("{resolution:e}"))
+                .arg("step", format!("{h:e}")),
             T::UnsupportedMethod { method } => {
                 Diagnostic::new(codes::E0606).arg("method", format!("{method:?}"))
             }
@@ -2834,6 +2863,7 @@ fn solve_transient_impl(
         bypass: tran_bypass(),
         on_task: tasks::transient_hook(),
         on_file: tasks::file_hook(),
+        stall_attempts: tran_stall_attempts(),
     };
 
     let BuiltInstances {
@@ -4749,6 +4779,7 @@ mod tests {
             bypass: None,
             on_task: None,
             on_file: None,
+            stall_attempts: Some(va_transient::integrator::STALL_ATTEMPTS_DEFAULT),
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -4942,6 +4973,7 @@ mod tests {
             bypass: None,
             on_task: None,
             on_file: None,
+            stall_attempts: Some(va_transient::integrator::STALL_ATTEMPTS_DEFAULT),
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -5009,6 +5041,7 @@ mod tests {
             bypass: None,
             on_task: None,
             on_file: None,
+            stall_attempts: Some(va_transient::integrator::STALL_ATTEMPTS_DEFAULT),
         };
         let wf =
             va_transient::integrator::run(&insts, dim, vec![0.0, 0.0], cfg).expect("integrates");
@@ -8518,6 +8551,16 @@ endmodule
             ),
             (Box::new(T::TimestepUnderflow { t: 1e-6 }), "E0605"),
             (
+                Box::new(T::Stalled {
+                    t: 1e-6,
+                    h: 1e-14,
+                    attempts: 10_000,
+                    advanced: 1e-10,
+                    resolution: 2e-8,
+                }),
+                "E0609",
+            ),
+            (
                 Box::new(T::UnsupportedMethod {
                     method: Method::Gear,
                 }),
@@ -9712,6 +9755,7 @@ endmodule
             bypass: None,
             on_task: Some(record_task),
             on_file: Some(record_file),
+            stall_attempts: Some(va_transient::integrator::STALL_ATTEMPTS_DEFAULT),
         };
         SEEN_TASKS.with(|s| s.borrow_mut().clear());
         va_transient::integrator::run(&[inst.as_ref()], 1, vec![0.0], cfg)

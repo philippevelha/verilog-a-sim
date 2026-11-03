@@ -1,0 +1,11 @@
+{
+  "code": "E0609",
+  "rev": 1,
+  "message": "the transient stalled at t = {time} s: {attempts} step attempts advanced it only {advanced} s, less than one step of {resolution} s (last step tried: {step} s)",
+  "description": "The step controller kept accepting steps far smaller than the deck asked for, or kept rejecting them, without getting anywhere: in a block of consecutive attempts, time moved less than one `.tran` step (or less than the smallest `bound_step` a model requested). At that pace the run would not finish, so it is stopped here rather than left running with no message. The usual causes are a node that rings or chatters at the edge of the error tolerance, a discontinuity that no step size resolves (an ideal switch, an `if` on a threshold, a source edge with zero rise time), or a model whose derivative is wrong near the operating point. The waveform up to this time was not written.",
+  "actions": [
+    "Look at what changes at that time: a source edge, a device turning on or off, a model's `if` on a threshold.",
+    "Give sources a finite rise and fall time; use `transition` in models instead of abrupt changes; add a small capacitance at a node with none.",
+    "If the circuit genuinely needs that many steps there, raise the limit with `--stall-steps <n>`, or turn the watchdog off with `--stall-steps 0`."
+  ]
+}
