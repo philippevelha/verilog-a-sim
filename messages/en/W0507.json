@@ -1,0 +1,10 @@
+{
+  "code": "W0507",
+  "rev": 1,
+  "message": "not applied: `{card}`; every node voltage and branch current is written",
+  "description": "Output selection cards (`.save`, `.print`, `.plot`, `.probe`, `.width`) have no effect: the output always holds every quantity of the circuit.",
+  "actions": [
+    "Remove the card, or leave it if the deck is shared with another simulator.",
+    "To narrow the printed output, use `va-cli`'s own options."
+  ]
+}

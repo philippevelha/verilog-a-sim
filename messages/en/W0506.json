@@ -1,0 +1,10 @@
+{
+  "code": "W0506",
+  "rev": 1,
+  "message": "not applied: `{card}`; the transient starts from the operating point, or from 0 V under `UIC`",
+  "description": "A `.ic` card's node voltages are not used. Without `UIC` the transient starts from the DC operating point; with `UIC` it starts from the zero vector plus each element's own `IC=`.",
+  "actions": [
+    "Put the initial voltage on the capacitor at that node as `IC=<volts>` and add `UIC` to the `.tran` card.",
+    "To choose between DC states without fixing the start, use `.nodeset V(node)=<volts>` instead."
+  ]
+}

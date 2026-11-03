@@ -117,7 +117,10 @@ pub struct Netlist {
     /// same "must fully parse or it's `None`" terms as [`Self::ac`].
     pub noise: Option<NoiseCard>,
     /// Constructs the deck contains that were recognised and **not applied**, as coded warnings
-    /// (`W05xx`) saying what was skipped and why (an ngspice `.control` block, `.options`). Not
+    /// (`W05xx`) saying what was skipped and why: an ngspice `.control` block, `.options`, any
+    /// dot-card the parser does not read (`.temp`, `.ic`, `.step`, `.meas`, …, 2.45.0), the
+    /// `.tran`/`.dc` fields it does not read, `IC=` without `UIC`, and a `PULSE` zero that
+    /// ngspice would read as a default. Not
     /// errors: the circuit itself parsed. `va-cli` prints them before solving, so a result is
     /// never read without knowing what of the deck it ignored.
     pub notes: Vec<Diagnostic>,

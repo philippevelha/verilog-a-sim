@@ -1,0 +1,10 @@
+{
+  "code": "W050B",
+  "rev": 1,
+  "message": "not applied: `IC=` on {elements}, because the `.tran` card has no `UIC`",
+  "description": "An element's `IC=` sets where a transient starts only when the run starts from the zero vector, which `UIC` asks for. Without `UIC` the run starts from the DC operating point, where the element's voltage or current is whatever the circuit gives it. This is SPICE's rule too.",
+  "actions": [
+    "Add `UIC` to the `.tran` card if the run should start from the `IC=` values.",
+    "Remove the `IC=` if the run should start from the operating point."
+  ]
+}

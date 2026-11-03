@@ -1,0 +1,10 @@
+{
+  "code": "W050C",
+  "rev": 1,
+  "message": "`{source}`: PULSE {field} = 0 is taken literally; SPICE3 and ngspice read a zero there as the default ({default} s)",
+  "description": "A zero rise or fall time is an ideal, instantaneous edge here; a zero width is a pulse with no flat top; a zero period is a pulse that does not repeat. ngspice and SPICE3 replace a zero rise or fall time with the `.tran` step and a zero width or period with `tstop`, so the same deck gives a different waveform there. An ideal edge is also the hardest thing a transient can integrate through.",
+  "actions": [
+    "Write the value you mean: a small nonzero edge time (for example 1 ns) rather than 0, or the width and period explicitly.",
+    "If the deck is shared with ngspice, avoid zeros in these four fields so both simulators read the same waveform."
+  ]
+}

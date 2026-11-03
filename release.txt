@@ -22,6 +22,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.45.0 - 2026-11-03
+-------------------
+**The netlist parser no longer drops a card in silence.** First item of the 101-circuits report
+(docs/bugs011126.txt, A1/A2/A4): `.temp 100` and `.ic V(c)=5` were discarded without a word, so a
+27 °C answer or a capacitor starting at 0 V looked like the deck's own result.
+  * Every dot-card that is not read now gets a coded warning with its line: W0505 `.temp` (the run
+    is at 300.15 K), W0506 `.ic`, W0507 output cards (`.save/.print/.plot/.probe/.width`; all
+    quantities are written anyway), W0508 analyses we do not have (`.four .tf .sens .pz .disto
+    .pss .hb .sp .pac .pnoise`), W0504 everything else (`.step`, `.meas`, `.param`, `.func`, `.lib`,
+    `.title`, ...). `.end` is the only card left unnoted.
+  * Parts of read cards that were dropped are noted too: W0509 `.tran` tstart (nonzero) / tmax,
+    W050A a nested `.dc` second sweep, W050B `IC=` on elements when `.tran` has no `UIC` (SPICE's
+    rule as well; first four named, then "and N more"), W050C an explicit zero TR/TF/PW/PER in
+    `PULSE`, which stays literal here but is "use the default" in SPICE3/ngspice (A4: not changed,
+    made loud — which reading is right is a portability call, not a bug).
+  * Nothing is solved differently; the warnings go to stderr before the result. Committed decks
+    that now warn: circuits/microring_thermal{,_fast}.net (PW = 0, deliberate) and
+    circuits/snn/fig4_neuron.net + docs/examples/snn_memristor/fig4_neuron_full.net (14 `IC=`
+    without `UIC`: those runs start from the operating point and always did).
+  * Not done here: implementing `.temp`, `.ic`, `I` sources, `.step` (see the report's order).
+  * cargo test --workspace: 1040 passed, 0 failed; clippy -D warnings clean. `xtask validate` not
+    re-run: no solve path changed.
+
+
 2.44.0+7 - 2026-10-25
 ---------------------
 **Multiphysics example 16, part 3: the nonlinear bubble cloud, its Poincare snapshots, and a

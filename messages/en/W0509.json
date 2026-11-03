@@ -1,0 +1,10 @@
+{
+  "code": "W0509",
+  "rev": 1,
+  "message": "`.tran` {field} `{value}` is not applied",
+  "description": "Only the `.tran` card's `tstep`, `tstop` and `UIC` are read. A nonzero `tstart` does not delay the output, which starts at 0; a `tmax` does not bound the step, which is set by the step controller's own error control.",
+  "actions": [
+    "If you need the output from `tstart` only, discard the earlier samples after the run.",
+    "If a `tmax` was there to resolve a fast feature, make `tstep` smaller instead."
+  ]
+}

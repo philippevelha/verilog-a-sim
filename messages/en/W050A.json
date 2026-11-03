@@ -1,0 +1,9 @@
+{
+  "code": "W050A",
+  "rev": 1,
+  "message": "`.dc`: the second sweep `{sweep}` is not applied; only the first source is swept",
+  "description": "Nested `.dc` sweeps are not supported. The first source is swept and the second stays at the DC value on its own line.",
+  "actions": [
+    "Run the deck once per value of the second source, with that value written on its line."
+  ]
+}

@@ -146,14 +146,18 @@ fn parse_with_base(deck: &str, base: Option<&std::path::Path>) -> Result<Netlist
     // period), and that card may appear *after* the source line. So the raw numbers are held
     // here and resolved once the whole deck has been read, rather than defaulted against
     // timing that may not have been parsed yet.
-    let mut pending_pulses: Vec<(usize, Vec<f64>)> = Vec::new();
+    let mut pending_pulses: Vec<(usize, Vec<f64>, String)> = Vec::new();
 
     // Comments, blank lines and `+` continuations are already resolved by `spice::expand`.
     for src in &expanded.lines {
         let line = src.text.as_str();
         let line_no = src.line;
+        let here = match src.origin.as_deref() {
+            Some(o) => format!("line {line_no} ({o})"),
+            None => format!("line {line_no}"),
+        };
         if let Some(stripped) = line.strip_prefix('.') {
-            parse_card(&mut net, stripped);
+            parse_card(&mut net, stripped, &here);
             continue;
         }
         let device = parse_device(
@@ -164,13 +168,47 @@ fn parse_with_base(deck: &str, base: Option<&std::path::Path>) -> Result<Netlist
             &expanded.models,
         )?;
         if let Some(nums) = pulse_numbers(line) {
-            pending_pulses.push((net.devices.len(), nums));
+            pending_pulses.push((net.devices.len(), nums, here));
         }
         net.devices.push(device);
     }
 
     resolve_pulse_defaults(&mut net, &pending_pulses);
+    note_unapplied_ics(&mut net);
     Ok(net)
+}
+
+/// `x` to six significant digits, shortest form: `4e-4`, not `0.00039999999999999996`.
+fn short_number(x: f64) -> String {
+    let rounded: f64 = format!("{x:.5e}").parse().unwrap_or(x);
+    format!("{rounded:e}")
+}
+
+/// A reactive element's `IC=` is applied only under `.tran … UIC` (SPICE's rule, and this
+/// project's: without `UIC` the run starts from the operating point, which has no place for
+/// it). A deck that writes `IC=` and no `UIC` gets one note naming every such element, so the
+/// condition is not silently dropped.
+fn note_unapplied_ics(net: &mut Netlist) {
+    if net.tran_uic {
+        return;
+    }
+    let named: Vec<&str> = net
+        .devices
+        .iter()
+        .filter(|d| d.ic.is_some())
+        .map(|d| d.name.as_str())
+        .collect();
+    if named.is_empty() {
+        return;
+    }
+    // A flattened subcircuit can carry dozens; the first few name the pattern.
+    const SHOWN: usize = 4;
+    let mut list = named[..named.len().min(SHOWN)].join(", ");
+    if named.len() > SHOWN {
+        list.push_str(&format!(" and {} more", named.len() - SHOWN));
+    }
+    let d = Diagnostic::new(codes::W050B).arg("elements", list);
+    net.notes.push(d);
 }
 
 /// Parse trailing `name=value` parameter overrides on a model-referencing device line.
@@ -245,9 +283,35 @@ fn pulse_numbers(line: &str) -> Option<Vec<f64>> {
 /// derive from, so an omitted rise/fall becomes an ideal (zero-time) edge and the pulse does
 /// not repeat — a `PULSE` source in a `.op`/`.dc`/`.ac`-only deck contributes its `v1` value
 /// regardless, so none of those defaults are observable there.
-fn resolve_pulse_defaults(net: &mut Netlist, pending: &[(usize, Vec<f64>)]) {
+///
+/// An *explicit* zero rise, fall, width or period is taken literally — an ideal edge, a pulse
+/// with no flat top, a pulse that does not repeat — where SPICE3 and ngspice read a zero there
+/// as "use the default". The deck is then not portable, and a zero-time edge is a hard thing to
+/// integrate through, so each such zero gets a note (only with a `.tran` card, the one analysis
+/// that can tell the two readings apart).
+fn resolve_pulse_defaults(net: &mut Netlist, pending: &[(usize, Vec<f64>, String)]) {
+    const FIELDS: [(usize, &str); 4] = [(3, "TR"), (4, "TF"), (5, "PW"), (6, "PER")];
     let (tstep, tstop) = net.tran.unwrap_or((0.0, 0.0));
-    for (idx, nums) in pending {
+    if net.tran.is_some() {
+        for (idx, nums, here) in pending {
+            let Some(name) = net.devices.get(*idx).map(|d| d.name.clone()) else {
+                continue;
+            };
+            for (i, field) in FIELDS {
+                if nums.get(i) == Some(&0.0) {
+                    let default = if i < 5 { tstep } else { tstop };
+                    net.notes.push(
+                        Diagnostic::new(codes::W050C)
+                            .arg("source", &name)
+                            .arg("field", field)
+                            .arg("default", short_number(default))
+                            .at(here.clone()),
+                    );
+                }
+            }
+        }
+    }
+    for (idx, nums, _) in pending {
         let Some(dev) = net.devices.get_mut(*idx) else {
             continue;
         };
@@ -264,21 +328,43 @@ fn resolve_pulse_defaults(net: &mut Netlist, pending: &[(usize, Vec<f64>)]) {
     }
 }
 
-/// Parse a dot-card, recording the analysis it requests. Unrecognized cards are ignored.
-fn parse_card(net: &mut Netlist, body: &str) {
+/// Parse a dot-card, recording the analysis it requests. `here` locates the card for a note.
+///
+/// A card this simulator does not read is **not applied, with a note** (`W0504`–`W0508`), never
+/// dropped in silence: a deck that says `.temp 100` or `.ic V(c)=5` and gets a 27 °C answer, or a
+/// capacitor starting at 0 V, must say so beside the result. `.end` is the one exception — it
+/// has nothing to apply.
+fn parse_card(net: &mut Netlist, body: &str, here: &str) {
     let toks: Vec<&str> = body.split_whitespace().collect();
     let name = toks.first().copied().unwrap_or("");
     if name.eq_ignore_ascii_case("nodeset") {
         parse_nodeset(net, body[name.len()..].trim());
         return;
     }
-    let card = match name.to_ascii_lowercase().as_str() {
+    let lower = name.to_ascii_lowercase();
+    let card = match lower.as_str() {
         "op" => AnalysisCard::Op,
         "dc" => AnalysisCard::Dc,
         "tran" => AnalysisCard::Tran,
         "ac" => AnalysisCard::Ac,
         "noise" => AnalysisCard::Noise,
-        _ => return, // `.end`, `.model`, etc. — ignored in v0.
+        "end" => return,
+        _ => {
+            let code = match lower.as_str() {
+                "temp" => codes::W0505,
+                "ic" => codes::W0506,
+                "save" | "print" | "plot" | "probe" | "width" => codes::W0507,
+                "four" | "sens" | "tf" | "pz" | "disto" | "pss" | "hb" | "sp" | "pac"
+                | "pnoise" => codes::W0508,
+                _ => codes::W0504,
+            };
+            net.notes.push(
+                Diagnostic::new(code)
+                    .arg("card", format!(".{body}"))
+                    .at(here),
+            );
+            return;
+        }
     };
     // The first analysis card wins.
     if net.analysis == AnalysisCard::Unspecified {
@@ -300,6 +386,24 @@ fn parse_card(net: &mut Netlist, body: &str) {
         ) {
             net.tran = Some((tstep, tstop));
         }
+        // `tstart` and `tmax`, positionally after `tstop`, are not applied: the output starts
+        // at 0 and the step controller is bounded by its own rules, not by `tmax`. A zero
+        // `tstart` is the default and changes nothing, so it gets no note.
+        let extra = toks
+            .iter()
+            .skip(3)
+            .filter(|t| !t.eq_ignore_ascii_case("uic"));
+        for (field, tok) in ["tstart", "tmax"].into_iter().zip(extra) {
+            if field == "tstart" && parse_value(tok) == Some(0.0) {
+                continue;
+            }
+            net.notes.push(
+                Diagnostic::new(codes::W0509)
+                    .arg("field", field)
+                    .arg("value", tok)
+                    .at(here),
+            );
+        }
     }
     // `.dc <source> <start> <stop> <step>` (§ ladder rung 2) — the SPICE-standard positional
     // sweep spec. `source` names a device (validated against `net.devices` by `va-cli`, not
@@ -318,6 +422,15 @@ fn parse_card(net: &mut Netlist, body: &str) {
                 stop,
                 step,
             });
+        }
+        // A second (nested) sweep, `.dc V1 0 5 0.1 V2 0 1 0.5`, is not run: only the first
+        // source is swept, with the second at its own DC value.
+        if toks.len() > 5 {
+            net.notes.push(
+                Diagnostic::new(codes::W050A)
+                    .arg("sweep", toks[5..].join(" "))
+                    .at(here),
+            );
         }
     }
     // `.ac dec <points-per-decade> <fstart> <fstop>` (T5) — SPICE's standard positional AC sweep
@@ -1286,5 +1399,114 @@ R2 b 0 1k
             "{:?}",
             net.notes
         );
+    }
+
+    /// The codes of a deck's notes, in order.
+    fn note_codes(deck: &str) -> Vec<String> {
+        parse(deck)
+            .expect("parses")
+            .notes
+            .iter()
+            .map(|n| n.code().as_str().to_string())
+            .collect()
+    }
+
+    /// A dot-card the parser does not read is noted with a code saying what was not applied,
+    /// and where — the 101-circuits report's A1 (`.temp`) and A2 (`.ic`) were silent drops.
+    /// `.end` is the only card that has nothing to apply and is not noted.
+    #[test]
+    fn every_unread_card_is_noted_not_dropped() {
+        for (card, code) in [
+            (".temp 100", "W0505"),
+            (".ic V(a)=5", "W0506"),
+            (".step param r 1k 10k 1k", "W0504"),
+            (".meas tran t1 when V(a)=0.5", "W0504"),
+            (".param r=1k", "W0504"),
+            (".title a divider", "W0504"),
+            (".save V(a)", "W0507"),
+            (".PRINT tran V(a)", "W0507"),
+            (".tf V(a) V1", "W0508"),
+            (".four 1k V(a)", "W0508"),
+        ] {
+            let deck = format!("V1 a 0 DC 1\nR1 a 0 1k\n{card}\n.op\n.end\n");
+            let net = parse(&deck).expect("parses");
+            assert_eq!(net.notes.len(), 1, "{card}: {:?}", net.notes);
+            let note = &net.notes[0];
+            assert_eq!(note.code().as_str(), code, "{card}");
+            assert_eq!(note.location(), Some("line 3"), "{card}");
+            assert!(note.to_string().contains(card), "{card}: {note}");
+        }
+        assert!(note_codes("V1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n").is_empty());
+    }
+
+    /// `.tran`'s `tstart` and `tmax` are noted when present; `UIC` among them is not a field,
+    /// and a zero `tstart` (the default) is not worth a note.
+    #[test]
+    fn tran_tstart_and_tmax_are_noted() {
+        let base = "V1 a 0 DC 1\nC1 a 0 1n\n";
+        let codes = |tran: &str| note_codes(&format!("{base}{tran}\n.end\n"));
+        assert!(codes(".tran 1u 1m").is_empty());
+        assert!(codes(".tran 1u 1m UIC").is_empty());
+        assert!(codes(".tran 1u 1m 0").is_empty());
+        assert_eq!(codes(".tran 1u 1m 0 10n"), ["W0509"]);
+        assert_eq!(codes(".tran 1u 1m 0.5m 10n UIC"), ["W0509", "W0509"]);
+        let net = parse(&format!("{base}.tran 1u 1m 0.5m\n.end\n")).expect("parses");
+        assert!(
+            net.notes[0].to_string().contains("tstart"),
+            "{}",
+            net.notes[0]
+        );
+        assert_eq!(
+            net.tran,
+            Some((1e-6, 1e-3)),
+            "the card itself is still read"
+        );
+    }
+
+    /// A nested `.dc` sweep runs the first sweep only, and says so.
+    #[test]
+    fn a_nested_dc_sweep_is_noted() {
+        let base = "V1 a 0 DC 1\nV2 b 0 DC 1\nR1 a b 1k\n";
+        assert!(note_codes(&format!("{base}.dc V1 0 5 0.1\n.end\n")).is_empty());
+        let net = parse(&format!("{base}.dc V1 0 5 0.1 V2 0 1 0.5\n.end\n")).expect("parses");
+        assert_eq!(net.notes.len(), 1);
+        assert_eq!(net.notes[0].code().as_str(), "W050A");
+        assert!(net.notes[0].to_string().contains("V2 0 1 0.5"));
+        assert_eq!(net.dc.map(|d| d.source), Some("V1".to_string()));
+    }
+
+    /// `IC=` without `UIC` is not applied, so it is noted, naming every such element once.
+    #[test]
+    fn ic_without_uic_is_noted() {
+        let deck = |tran: &str| {
+            format!("V1 a 0 DC 1\nR1 a b 1k\nC1 b 0 1n IC=5\nC2 a 0 1n IC=1\n{tran}\n.end\n")
+        };
+        assert!(note_codes(&deck(".tran 1n 1u UIC")).is_empty());
+        let net = parse(&deck(".tran 1n 1u")).expect("parses");
+        assert_eq!(net.notes.len(), 1, "{:?}", net.notes);
+        assert_eq!(net.notes[0].code().as_str(), "W050B");
+        assert!(
+            net.notes[0].to_string().contains("C1, C2"),
+            "{}",
+            net.notes[0]
+        );
+    }
+
+    /// An explicit zero rise/fall/width/period in a `PULSE` is still taken literally (the
+    /// waveform does not change), and noted, because ngspice reads the same zero as a default.
+    #[test]
+    fn a_zero_pulse_field_is_noted_and_still_literal() {
+        let deck = "V1 a 0 PULSE(0 5 0 1u 1u 0 2u)\nR1 a 0 1k\n.tran 10n 10u\n.end\n";
+        let net = parse(deck).expect("parses");
+        let codes: Vec<_> = net.notes.iter().map(|n| n.code().as_str()).collect();
+        assert_eq!(codes, ["W050C"], "{:?}", net.notes);
+        assert!(net.notes[0].to_string().contains("PW"), "{}", net.notes[0]);
+        assert!(matches!(
+            net.devices[0].waveform,
+            Some(Waveform::Pulse { pw, .. }) if pw == 0.0
+        ));
+        // Omitted fields take the defaults and are not noted; without `.tran` nothing is.
+        assert!(note_codes("V1 a 0 PULSE(0 5)\nR1 a 0 1k\n.tran 10n 10u\n.end\n").is_empty());
+        assert!(note_codes("V1 a 0 PULSE(0 5 0 0 0 0 0)\nR1 a 0 1k\n.op\n.end\n").is_empty());
     }
 }

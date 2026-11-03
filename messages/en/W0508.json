@@ -1,0 +1,10 @@
+{
+  "code": "W0508",
+  "rev": 1,
+  "message": "not applied: `{card}`; this analysis is not available",
+  "description": "The deck asks for an analysis this simulator does not have (such as `.four`, `.tf`, `.sens`, `.pz`, `.disto`, `.pss`, `.hb`, `.sp`), so it is not run. The analyses available are `.op`, `.dc`, `.tran`, `.ac` and `.noise`.",
+  "actions": [
+    "Derive the quantity from an available analysis: a transfer function from `.ac`, Fourier components from the `.tran` output.",
+    "Remove the card if you only need the other analyses in the deck."
+  ]
+}

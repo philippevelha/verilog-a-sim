@@ -1,0 +1,10 @@
+{
+  "code": "W0504",
+  "rev": 1,
+  "message": "not applied: `{card}` is not a card this simulator reads",
+  "description": "The card is recognised as a dot-card but has no meaning here, so the deck runs as if it were not there. Cards in this group include `.step` (the deck runs once, at the values written), `.meas` (nothing is measured), `.param` and `.func` (the names are not defined), `.lib` (nothing is loaded) and `.title`.",
+  "actions": [
+    "If the card matters to the result, rewrite the deck without it: one run per `.step` value, values written literally instead of `.param` names, `.include` instead of `.lib`, and measurements taken from the printed output.",
+    "Leave it if the deck is shared with another simulator and the card does not affect what you read here."
+  ]
+}

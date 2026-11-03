@@ -936,6 +936,33 @@ pub const W0502: Code = Code::new("W0502");
 /// not applied: `{card}`
 pub const W0503: Code = Code::new("W0503");
 
+/// not applied: `{card}` is not a card this simulator reads
+pub const W0504: Code = Code::new("W0504");
+
+/// not applied: `{card}`; every analysis runs at 27 °C (300.15 K)
+pub const W0505: Code = Code::new("W0505");
+
+/// not applied: `{card}`; the transient starts from the operating point, or from 0 V under `UIC`
+pub const W0506: Code = Code::new("W0506");
+
+/// not applied: `{card}`; every node voltage and branch current is written
+pub const W0507: Code = Code::new("W0507");
+
+/// not applied: `{card}`; this analysis is not available
+pub const W0508: Code = Code::new("W0508");
+
+/// `.tran` {field} `{value}` is not applied
+pub const W0509: Code = Code::new("W0509");
+
+/// `.dc`: the second sweep `{sweep}` is not applied; only the first source is swept
+pub const W050A: Code = Code::new("W050A");
+
+/// not applied: `IC=` on {elements}, because the `.tran` card has no `UIC`
+pub const W050B: Code = Code::new("W050B");
+
+/// `{source}`: PULSE {field} = 0 is taken literally; SPICE3 and ngspice read a zero there as the default ({default} s)
+pub const W050C: Code = Code::new("W050C");
+
 /// `.nodeset`: the solve with the nodeset nets held did not converge ({reason}); the nodesets are used as a starting point only
 pub const W0701: Code = Code::new("W0701");
 
@@ -964,5 +991,5 @@ pub const ALL: &[Code] = &[
     E0739, E073A, R0101, R0201, R0202, R0203, R0204, R0301, R0302, R0303, R0304, R0305, R0306,
     R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405, R0406, R0407, R0408, R0409,
     R0410, R0411, W0101, W0102, W0103, W0104, W0301, W0302, W0401, W0402, W0403, W0501, W0502,
-    W0503, W0701,
+    W0503, W0504, W0505, W0506, W0507, W0508, W0509, W050A, W050B, W050C, W0701,
 ];
