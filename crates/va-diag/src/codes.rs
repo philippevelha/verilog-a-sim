@@ -972,6 +972,9 @@ pub const W050B: Code = Code::new("W050B");
 /// `{source}`: PULSE {field} = 0 is taken literally; SPICE3 and ngspice read a zero there as the default ({default} s)
 pub const W050C: Code = Code::new("W050C");
 
+/// the transient went still at t = {time} s and nothing changed for the last {share}% of the run
+pub const W0601: Code = Code::new("W0601");
+
 /// `.nodeset`: the solve with the nodeset nets held did not converge ({reason}); the nodesets are used as a starting point only
 pub const W0701: Code = Code::new("W0701");
 
@@ -1001,5 +1004,5 @@ pub const ALL: &[Code] = &[
     R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405, R0406,
     R0407, R0408, R0409, R0410, R0411, W0101, W0102, W0103, W0104, W0301, W0302, W0401, W0402,
     W0403, W0501, W0502, W0503, W0504, W0505, W0506, W0507, W0508, W0509, W050A, W050B, W050C,
-    W0701,
+    W0601, W0701,
 ];

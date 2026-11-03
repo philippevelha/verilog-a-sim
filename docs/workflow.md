@@ -171,6 +171,23 @@ cargo run -p va-cli -- sim circuits/rc_ac.net --ac
 cargo run -p va-cli -- sim circuits/diode_noise.net --model models/diode.va --noise
 ```
 
+### A symmetric oscillator may not start
+
+The simulator computes two identical halves of a circuit identically, to the last bit. A
+perfectly symmetric oscillator, such as an astable multivibrator with matched transistors,
+resistors and capacitors, therefore follows its symmetric solution exactly. If that state is
+stable, the oscillator never starts. In an astable whose supplies ramp up together, both
+transistors end up saturated, which is such a state. QSPICE behaves the same way. ngspice
+sometimes starts such circuits, but only because its rounding differs slightly between the two
+halves: that is luck, not physics. A real circuit starts because its parts are never identical.
+On the 101-circuit report's D9, a 1e-5 mismatch in one base resistor starts it and 1e-6 does
+not.
+
+When a transient goes completely still for most of its window, `va-cli` says so (`W0601`). If the
+circuit was meant to settle, ignore it. If it was meant to oscillate, break the symmetry:
+- make one component slightly different (a resistor 0.1 % off), or
+- kick one node with an initial condition, such as `.ic V(c1)=0.1` (with or without `UIC`).
+
 Validation against QSPICE golden data is a separate command, `cargo xtask validate`, which
 drives the same `va_cli::run_sim` library entry point over every deck in `circuits/` that has
 a committed `golden/` file (`docs/validation.md`).

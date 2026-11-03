@@ -22,6 +22,29 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.51.0 - 2026-11-03
+-------------------
+**W0601: a transient that goes completely still for most of its window is pointed out.** The
+warning says that if this was expected there is nothing to worry about, but an oscillator may need
+a small symmetry-breaking mismatch or an `.ic` kick. A docs/workflow.md section explains why.
+  * The case (101-circuits D9, a symmetric astable that never starts) is not a solver bug. Our run
+    is exactly symmetric (|V(c1)-V(c2)| = 0 for all 800 us), and the state it reaches, both
+    transistors saturated, is stable for this circuit. QSPICE on the same deck does the same: both
+    collectors at 0.0760 V, |c1-c2| < 3e-11 V. ngspice starts only because its rounding is
+    asymmetric. A 1e-5 mismatch in one base resistor starts it, 1e-6 does not, and `.ic V(c1)=0.1`
+    starts it (7 transitions in 600 us).
+  * Trigger (va-cli `quiet_from`): every reported quantity stays within 1e-6 of its own largest
+    magnitude over the run, around its final value, for at least the last 90% of the window and
+    at least 20 points. That is strict on purpose: a slow tail still moving, or an ordinary step
+    response flat only for its second half, does not trigger it. D9 triggers it (still from
+    4.4e-5 s, 95%). It is silent on D9 with the kick, on 10 ordinary transient decks (rc_step,
+    rc_pulse, rectifier, ring_osc, rlc_ring, rl_decay, rc_discharge, isource_rc, laplace_step,
+    rc_step_hv) and on every validate gate. **Limitation:** a circuit meant to sit still after
+    its first tenth gets it too, which is why the wording allows that the result may be expected.
+  * Figures: cargo test --workspace 1049 passed, 0 failed (+1: still early -> noticed; a settling
+    exponential and a half-window step -> not); xtask validate 31/31.
+
+
 2.50.0 - 2026-11-03
 -------------------
 **Transient step floor tstep*1e-9 (was 1e-6), and the first step gets the DC Newton budget.**

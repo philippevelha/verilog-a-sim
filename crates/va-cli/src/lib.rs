@@ -935,6 +935,21 @@ pub fn run_sim(
                 wf.stalled_steps
             );
         }
+        if let Some(quiet) = quiet_from(&wf) {
+            eprintln!(
+                "[va-cli] {}",
+                va_diag::Diagnostic::new(va_diag::codes::W0601)
+                    .arg("time", format!("{quiet:e}"))
+                    .arg(
+                        "share",
+                        format!(
+                            "{:.0}",
+                            100.0 * (wf.t[wf.t.len() - 1] - quiet)
+                                / (wf.t[wf.t.len() - 1] - wf.t[0])
+                        )
+                    )
+            );
+        }
         report_transient(&shown, &wf).context("writing the transient waveform to stdout")?;
         if let Some(f) = &wf.finished {
             tasks::report_finish(f.kind, &f.by, &format!("t={:e}", f.t));
@@ -2193,6 +2208,60 @@ fn operating_point_nodeset(
     };
     va_core::dc::operating_point_continued(refs, dim, cfg, None, Some(&from))
 }
+
+/// The time from which a transient went **completely still**, if it did so early: every
+/// recorded quantity stays within [`QUIET_RELTOL`] of its own largest magnitude over the run of
+/// its final value, from that time to the end, and that stretch is at least
+/// [`QUIET_SHARE`] of the window and [`QUIET_MIN_POINTS`] accepted points. `None` otherwise, and
+/// for a run too short to judge. Feeds `W0601` (2.50.0+1).
+///
+/// Why it exists: a perfectly symmetric oscillator (the 101-circuit report's D9, an astable
+/// multivibrator) follows its symmetric solution exactly, both halves bit-identical, and settles
+/// with both transistors saturated, which for that circuit is a stable state. QSPICE does the
+/// same; ngspice starts only because its rounding is not symmetric. Nothing is wrong with the
+/// solve, but a run that should oscillate and shows two flat lines deserves a word. The
+/// tolerance is strict so that a slow tail still moving is not called still, and the share is
+/// large so that an ordinary step response, designed to show its transient, does not trigger
+/// it. **Limitation:** a circuit that is meant to sit still for most of the window (a run with
+/// nothing switching after the first tenth) gets the warning too, which is why it says the
+/// result may well be expected.
+fn quiet_from(wf: &va_transient::integrator::Waveform) -> Option<f64> {
+    let n = wf.t.len();
+    if n < QUIET_MIN_POINTS + 1 {
+        return None;
+    }
+    let (t0, t_end) = (wf.t[0], wf.t[n - 1]);
+    if t_end <= t0 {
+        return None;
+    }
+    let last = &wf.x[n - 1];
+    let scale: Vec<f64> = (0..last.len())
+        .map(|k| wf.x.iter().fold(0.0_f64, |m, row| m.max(row[k].abs())))
+        .collect();
+    // The earliest index from which every later point is within tolerance of the final one.
+    let mut from = n - 1;
+    while from > 0 {
+        let row = &wf.x[from - 1];
+        let still = row
+            .iter()
+            .zip(last)
+            .zip(&scale)
+            .all(|((v, f), s)| (v - f).abs() <= QUIET_RELTOL * s + 1e-300);
+        if !still {
+            break;
+        }
+        from -= 1;
+    }
+    let quiet = wf.t[from];
+    (n - from >= QUIET_MIN_POINTS && t_end - quiet >= QUIET_SHARE * (t_end - t0)).then_some(quiet)
+}
+
+/// [`quiet_from`]'s tolerance: a millionth of each quantity's largest magnitude over the run.
+const QUIET_RELTOL: f64 = 1e-6;
+/// [`quiet_from`]'s minimum still stretch, as a share of the window.
+const QUIET_SHARE: f64 = 0.9;
+/// [`quiet_from`]'s minimum still stretch, in accepted points.
+const QUIET_MIN_POINTS: usize = 20;
 
 /// The coded diagnostic for an error raised by the numerical crates (`va-core`,
 /// `va-transient`, `va-acnoise`), or `None` for any other error.
@@ -4527,6 +4596,38 @@ fn report_transient(quantities: &[Quantity], wf: &Waveform) -> std::io::Result<(
 mod tests {
     use super::*;
     use va_abi::reference::GROUND;
+
+    /// `W0601`'s trigger (`quiet_from`): a waveform that goes flat early and stays flat is
+    /// reported from where it went flat; one still moving at the end, or flat only for its last
+    /// half, is not.
+    #[test]
+    fn a_transient_that_goes_still_early_is_noticed_and_a_settling_one_is_not() {
+        let wave = |f: &dyn Fn(f64) -> f64| {
+            let t: Vec<f64> = (0..=100).map(|i| i as f64 * 1e-6).collect();
+            let x = t.iter().map(|&t| vec![f(t), 1.0]).collect();
+            va_transient::integrator::Waveform {
+                t,
+                x,
+                columns: None,
+                crossings: Vec::new(),
+                model_crossings: Vec::new(),
+                unresolved_events: 0,
+                stalled_steps: 0,
+                bypass: None,
+                finished: None,
+            }
+        };
+        // Flat from 5 us of 100 us: noticed, at 5 us.
+        let still = wave(&|t| if t < 5e-6 { t / 5e-6 } else { 1.0 });
+        let at = quiet_from(&still).expect("noticed");
+        assert!((at - 5e-6).abs() < 1e-15, "went still at {at:e}");
+        // An exponential settling with tau = 10 us is still moving by more than 1e-6 at the end.
+        let settling = wave(&|t| 1.0 - libm::exp(-t / 1e-5));
+        assert_eq!(quiet_from(&settling), None);
+        // Flat only for its last half: an ordinary step response, not noticed.
+        let half = wave(&|t| if t < 5e-5 { t / 5e-5 } else { 1.0 });
+        assert_eq!(quiet_from(&half), None);
+    }
 
     /// A library directory may hold models a deck never places, and a *transient* refusal
     /// (a step-scoped trigger; `absdelay` until 2.44.0) must be about the models the deck uses — 2026-09-11,

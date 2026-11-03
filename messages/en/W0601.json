@@ -1,0 +1,11 @@
+{
+  "code": "W0601",
+  "rev": 1,
+  "message": "no changes detected after t = {time} s: nothing moved for the last {share}% of the run. If that was expected, there is nothing to worry about; if you expected an oscillation, the circuit may need a small symmetry-breaking mismatch or an `.ic` kick",
+  "description": "From this time to the end of the transient, every reported quantity stayed within a millionth of its own largest value of where it finished. Often that is simply the answer: the circuit settled. But an oscillator built perfectly symmetric (two identical halves, identical components) can follow its symmetric solution exactly, because the simulator computes both halves the same way to the last bit, and if that symmetric state is stable (an astable with both transistors saturated, for example) it never starts. A real circuit starts because its parts are not identical; another simulator may start because its rounding happens to differ between the two halves, which is luck rather than physics.",
+  "actions": [
+    "If the circuit is meant to settle, ignore this.",
+    "If it is meant to oscillate, break the symmetry: make one component differ slightly (a resistor 0.1% off), or give one node a different starting value with `.ic V(<net>)=<value>`.",
+    "Check that the oscillator can start at all from the state it reached: a latch-up with both sides saturated is a real failure mode of some designs."
+  ]
+}
