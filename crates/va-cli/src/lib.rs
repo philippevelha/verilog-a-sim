@@ -182,6 +182,10 @@ pub fn set_tran_tolerances(lte_reltol: f64, lte_abstol: f64, newton_reltol: f64)
     );
 }
 
+/// The `.tran` step floor as a fraction of the card's `tstep` (`TranConfig::tstep_min`): 1e-9
+/// since 2.50.0, 1e-6 before.
+pub const TRAN_TSTEP_MIN_FACTOR: f64 = 1e-9;
+
 /// The transient step controller's relative tolerance unless [`set_tran_tolerances`] says
 /// otherwise.
 pub const TRAN_LTE_RELTOL_DEFAULT: f64 = 1e-3;
@@ -2847,7 +2851,15 @@ fn solve_transient_impl(
         tstart: 0.0,
         tstop,
         tstep,
-        tstep_min: tstep * 1e-6,
+        // The floor: `tstep`*1e-9 since 2.50.0, 1e-6 before. A `.tran` step sized for the
+        // waveform's scale says nothing about the circuit's fastest edge, and 1e-6 put the floor
+        // above what such an edge needs. In the 101-circuit report, D1 (`.tran 1u 2`, a DRAM
+        // cell with 0.5 ns wordline edges) needs ~0.7 ps steps at the edge and had a 1 ps floor;
+        // D11 needs sub-ps steps right after its `UIC` start. ngspice's floor is 1e-11 of its
+        // maximum step. Lower costs nothing to a run that never reaches the floor. One that
+        // does (the floor rule, the seed rule) now gets three more decades of halving first.
+        // The stall watchdog (2.48.0) stops a run that crawls along the new floor.
+        tstep_min: tstep * TRAN_TSTEP_MIN_FACTOR,
         method,
         lte_reltol: tran_lte_reltol(),
         lte_abstol: tran_lte_abstol(),

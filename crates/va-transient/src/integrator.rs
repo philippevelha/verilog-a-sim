@@ -173,6 +173,23 @@ pub struct TranConfig {
     pub stall_attempts: Option<usize>,
 }
 
+/// Newton iterations allowed per timestep solve, the value every transient used before 2.50.0.
+pub const STEP_NEWTON_ITERS: usize = 100;
+
+/// Newton iterations allowed on the run's **first step** from its seed (2.50.0): the DC solve's
+/// budget, `va_core::newton::MAX_ITERS_DEFAULT`, rather than [`STEP_NEWTON_ITERS`].
+///
+/// Why only the first step: from a `UIC` seed every unknown without an initial condition starts at
+/// zero while the sources are already at full value, so the first step is a DC-like solve from a
+/// point that is not a solution, not a small correction to the previous one. Junction limiting
+/// walks a junction node far from ground about 0.15 V an iteration (the reason the DC budget rose
+/// to 300 in 2.49.0), and the step size cannot help: in the 101-circuit report's D11 (a bootstrap
+/// sweep generator, +15/-5 V rails, `.tran ... UIC`) every halving from 0.5 us down to the floor
+/// ended at the same iterate with the same residual, 0.965, at iteration 100. Every later step
+/// starts from an accepted solution and keeps the old budget, so a step that fails at 100 is
+/// still halved exactly as before. A run whose first step converged within 100 is bit-identical.
+pub const FIRST_STEP_NEWTON_ITERS: usize = va_core::newton::MAX_ITERS_DEFAULT;
+
 /// [`TranConfig::stall_attempts`]'s default: ten thousand step attempts without advancing one
 /// `tstep`. A sharp edge resolved down to `tstep_min` (`tstep`·1e-6 in `va-cli`) takes some tens
 /// of halvings and a few hundred steps, so this is two orders of magnitude above what a
@@ -1385,8 +1402,8 @@ fn newton_step(
     linear: &mut Linear,
     allow_stall: bool,
     reltol: f64,
+    max_iters: usize,
 ) -> Result<Solved, TransientError> {
-    const MAX_ITERS: usize = 100;
     const ABSTOL: f64 = 1e-12;
     // The stall rule's tolerances (see the end of the iteration loop).
     const STALL_RELTOL: f64 = 1e-6;
@@ -1404,7 +1421,7 @@ fn newton_step(
     let mut last_residual = f64::INFINITY;
     // Consecutive iterations that met the stall rule's tolerances (see the end of this loop).
     let mut stalled_for = 0usize;
-    for iteration in 0..MAX_ITERS {
+    for iteration in 0..max_iters {
         // Every iteration re-evaluates at the same candidate landing time `t`: the *timepoint*
         // context is a property of the point being solved for, not of how many iterations it
         // takes. `$simparam("iteration")` is the exception, and is exactly why the context is
@@ -1471,7 +1488,7 @@ fn newton_step(
             // (§ junction limiting). This loop is `va-core::newton::solve_from`'s counterpart
             // for the transient solve, and it carried the same blanket-limiting bug: the clamp
             // compresses a step to roughly vt*ln(...), so any node whose solution is more than
-            // a few volts from the previous point could not be reached inside `MAX_ITERS`.
+            // a few volts from the previous point could not be reached inside the iteration budget.
             // Fixing `va-core` alone left this copy throttling every transient run — a driven
             // node above ~10-20 V simply failed to converge. Two implementations of one rule
             // is how that happened; they are kept in step by both reading
@@ -1527,12 +1544,12 @@ fn newton_step(
         state.stalled += 1;
         return Ok(Solved {
             x,
-            iterations: MAX_ITERS - 1,
+            iterations: max_iters - 1,
         });
     }
 
     Err(va_core::CoreError::NoConvergence {
-        iters: MAX_ITERS,
+        iters: max_iters,
         residual: last_residual,
     }
     .into())
@@ -1846,6 +1863,13 @@ fn integrate(
     while t < cfg.tstop && finish.is_none() {
         loop {
             attempts += 1;
+            // Newton's budget for this attempt: the run's first step from the seed gets the DC
+            // solve's (see `FIRST_STEP_NEWTON_ITERS`), every later step `STEP_NEWTON_ITERS`.
+            let newton_budget = if waveform.t.len() == 1 {
+                FIRST_STEP_NEWTON_ITERS
+            } else {
+                STEP_NEWTON_ITERS
+            };
             if let Some(bound) = step_bound {
                 block_bound = block_bound.min(bound);
             }
@@ -1980,6 +2004,7 @@ fn integrate(
                 &mut linear,
                 h * 0.5 < cfg.tstep_min,
                 cfg.newton_reltol,
+                newton_budget,
             ) {
                 Ok(solved) => solved,
                 // A step Newton cannot converge on is a step that was too long, the same
@@ -2093,6 +2118,7 @@ fn integrate(
                         &mut linear,
                         h * 0.5 < cfg.tstep_min,
                         cfg.newton_reltol,
+                        newton_budget,
                     ) {
                         Ok(solved) => solved.x,
                         // The reference solve failing is the step being too long, exactly as
@@ -2373,6 +2399,7 @@ fn integrate(
                         &mut linear,
                         h * 0.5 < cfg.tstep_min,
                         cfg.newton_reltol,
+                        newton_budget,
                     )?;
                     x = resolved.x;
                     converged_at = resolved.iterations;
@@ -4009,6 +4036,39 @@ mod tests {
             "expected ~100 floor-sized steps, got {}",
             wf.t.len()
         );
+    }
+
+    /// **The first step gets the DC budget** (2.50.0, [`FIRST_STEP_NEWTON_ITERS`]). A diode
+    /// between two resistors off a 40 V supply, started cold from all zeros as `UIC` would:
+    /// both diode terminals are junction unknowns settling near 20 V, which junction limiting
+    /// reaches ~0.15 V an iteration, and no step size shortens that walk. A capacitor on a separate
+    /// RC branch makes the run a transient. Discriminating, checked: with the first step held to
+    /// [`STEP_NEWTON_ITERS`] this is `TimestepUnderflow { t: 0 }`.
+    #[test]
+    fn a_cold_first_step_far_from_ground_converges_on_the_dc_budget() {
+        let vs = va_abi::reference::VSource::new(0, va_abi::reference::GROUND, 4, 40.0);
+        let r1 = va_abi::reference::Resistor::new(0, 1, 1000.0);
+        let d =
+            va_abi::reference::Diode::new(1, 2, 1e-14, 1.0, va_abi::reference::diode::VT_NOMINAL);
+        let r2 = va_abi::reference::Resistor::new(2, va_abi::reference::GROUND, 1000.0);
+        // The capacitor hangs off the supply through its own resistor, not on the diode's
+        // nodes: there it would pin them near zero at small steps and let halving shorten the
+        // walk, which is not what D11 showed (the same residual at every step size).
+        let r3 = va_abi::reference::Resistor::new(0, 3, 1000.0);
+        let c = va_abi::reference::Capacitor::new(3, va_abi::reference::GROUND, 1e-12);
+        let insts: [&dyn ModelInstance; 6] = [&vs, &r1, &d, &r2, &r3, &c];
+
+        let wf = run(
+            &insts,
+            5,
+            vec![0.0; 5],
+            default_cfg(1e-6, 1e-7, Method::BackwardEuler),
+        )
+        .expect("the cold first step converges within the DC budget");
+        let last = wf.x.last().expect("points");
+        assert!(last[2] > 19.0, "V(cathode) = {}", last[2]);
+        let vd = last[1] - last[2];
+        assert!(vd > 0.6 && vd < 0.8, "diode drop {vd}");
     }
 
     /// **The stall watchdog** (2.48.0). An RC filter driven at 7.3 MHz with a 1 µs `tstep`: the

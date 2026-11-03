@@ -22,6 +22,45 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.50.0 - 2026-11-03
+-------------------
+**Transient step floor tstep*1e-9 (was 1e-6), and the first step gets the DC Newton budget.**
+These fix 101-circuits D1 and D11 (both E0605).
+  * D1 (`.tran 1u 2`, 3T DRAM cell, 0.5 ns wordline edges): at the 20.5 ns falling edge a stateful
+    row (the floating storage node as M1 turns off) needs ~0.7 ps steps, and the floor was 1 ps.
+    Its error ratio went 511 -> 506 -> 363 -> 72 as h fell from 4.2 ns to 4.2 ps, then the next
+    cut was below the floor. Floors tried: 1e-7 carries it, 1e-9 chosen for margin (ngspice's
+    delmin is 1e-11 of its maximum step). It now runs all 2 s: 2 000 412 points, 576 s. The storage
+    node writes to 4.42 V, settles to 4.21 V after the wordline falls, leaks to 0 by 0.5 s and is
+    rewritten at 1 s. Plausible; not checked against ngspice, which is not installed here.
+  * D11 (bootstrap sweep generator, `.tran 0.5u 2m UIC`): two causes. First, the UIC first step
+    failed Newton at every step size with the same residual (0.965) at iteration 100: the bias
+    network is algebraic, so halving does not help, and junction limiting walks its nodes
+    0.15 V an iteration (as in 2.49.0's C1). The first step from the seed now gets
+    va_core::newton::MAX_ITERS_DEFAULT (300); every later step keeps 100
+    (`STEP_NEWTON_ITERS`, `FIRST_STEP_NEWTON_ITERS`), so a later step that fails is halved exactly
+    as before. Second, past the seed the junction time constants (Rb 100 ohm x pF) need sub-ps
+    steps, below the old 0.5 ps floor. With both it runs to 2 ms (4469 points). After the first
+    reset at 1 ms it matches the same deck started from .op to 1e-4 V (V(v) 4.3447 vs 4.3448 V at
+    1.5 ms, 7.2039 V at 1.97 ms); before the reset the UIC run ramps up from 0 as it should.
+  * Cost: a run that never reaches the floor is untouched. One that does (the floor rule, the seed
+    rule, Newton's last-chance stall rule, breakpoints closer together than the floor) now tries
+    about three more decades of halving first, and where it accepts can move. xtask validate gives
+    the same error figure on every transient gate at floors 1e-6, 1e-7 and 1e-9. The stall
+    watchdog (2.48.0) stops a run that crawls along the lower floor.
+  * Figures: cargo test --workspace 1048 passed, 0 failed (+1: a diode between resistors at 40 V,
+    started cold, fails at a 100-iteration first step and converges at 300; checked both ways);
+    xtask validate 31/31.
+    deck-diff against 2.48.0 (120 s cap per deck): stopped after 9 decks when the machine ran
+    low on memory, so it is NOT a full check. 7 were identical, 1 timed out (c17_tran) and 1
+    differed: benchmark/cap_fast_edge.net, 119 -> 130 points. That deck exists to exercise the
+    floor rule. Every shared timepoint is bit-identical and the final values match. The 11 extra
+    points are the deeper halving before the rule relaxes, as predicted above. The remaining decks
+    are unchecked: rerun `deck-diff` before relying on bit-identity elsewhere.
+  * Reproducers: D1 and D11 now run. D12/D13/D14 stop with E0609 (2.48.0); D5 and D10 are slow,
+    not failing; D9 (an astable that never starts) is still open.
+
+
 2.49.0 - 2026-11-03
 -------------------
 **DC Newton budget 100 -> 300 iterations** (`va_core::newton::MAX_ITERS_DEFAULT`). This fixes
