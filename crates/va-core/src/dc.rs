@@ -401,7 +401,15 @@ mod tests {
         // and went red on macOS for exactly that reason while Linux and Windows stayed green —
         // a real portability bug in the assertion, not in the solver. The precondition the
         // rescue actually needs is `worth_a_gmin_retry`, so that is what is checked.
-        let bare = crate::newton::solve(&insts, dim, NewtonConfig::default());
+        //
+        // At 100 iterations, the default this was written against: at 2.49.0's 300 plain Newton
+        // walks this chain all the way (`newton::MAX_ITERS_DEFAULT`). The rescue's per-stage
+        // budget is 150 either way (`GMIN_RESCUE_ITERS`).
+        let cfg = NewtonConfig {
+            max_iters: 100,
+            ..NewtonConfig::default()
+        };
+        let bare = crate::newton::solve(&insts, dim, cfg);
         match &bare {
             Err(e) => assert!(
                 worth_a_gmin_retry(e),
@@ -413,8 +421,7 @@ mod tests {
             ),
         }
 
-        let op = operating_point(&insts, dim, NewtonConfig::default())
-            .expect("the gmin rescue should carry this");
+        let op = operating_point(&insts, dim, cfg).expect("the gmin rescue should carry this");
         // ~0.81 V across each of 20 diodes, the rest across the 10 Ω resistor.
         let i_r = (op.x[0] - op.x[1]) / 10.0;
         assert!(

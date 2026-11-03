@@ -36,7 +36,8 @@ use va_abi::{ModelInstance, UnknownKind};
 /// Tunable Newton iteration controls.
 #[derive(Clone, Copy, Debug)]
 pub struct NewtonConfig {
-    /// Maximum iterations before declaring non-convergence.
+    /// Maximum iterations before declaring non-convergence. [`MAX_ITERS_DEFAULT`] unless the
+    /// caller says otherwise.
     pub max_iters: usize,
     /// Absolute residual tolerance for convergence.
     pub abstol: f64,
@@ -147,10 +148,33 @@ impl NewtonConfig {
 /// `(name, total so far)` pairs to the vector it is given.
 pub type CounterSource = fn(&mut Vec<(&'static str, u64)>);
 
+/// [`NewtonConfig::max_iters`]'s default: 300 since 2.49.0, 100 before.
+///
+/// **Why 300 and not SPICE's 100 (`ITL1`).** SPICE limits each *junction voltage*, the
+/// difference across a device's p-n junction. This engine limits per *unknown*
+/// (`va_abi::ModelInstance::unknown_is_junction` is a per-unknown flag), so a junction node is
+/// clamped on its potential to ground. For a node far from ground that is the wrong quantity:
+/// above `vcrit` every upward step is compressed to `vt·ln(1 + Δ/vt)`, about 0.15 V, so a BJT
+/// collector that settles at 7.9 V spends ~50 iterations just walking there. A compiled model
+/// with an `exp` and no `$limit` marks *every* node a junction (the fallback guess), collector
+/// included. Two decks in the 101-circuit report failed on exactly this (`docs/bugs011126.txt`
+/// C1, a Darlington with a PNP load that converges at iteration 143, and C2, a Schmitt
+/// trigger's `.dc` sweep), and both solve at 300, matching QSPICE (C1: V(out) 7.93842 V
+/// against 7.93867 V).
+///
+/// The budget only matters to a solve that has not converged by iteration 100. Every solve that
+/// converged before converges at the same iteration with the same bits; one that failed by
+/// another route (a singular matrix, a non-finite row) fails at the same point. What it costs is
+/// a non-converging plain solve: 200 more iterations before the `gmin` rescue begins, and each
+/// rescue stage's budget follows (`dc`'s `GMIN_RESCUE_ITERS` is a floor). **The root fix** is
+/// limiting junction *differences*, which needs Interface beta to say which unknown pairs form a
+/// junction, a section 6 change that has not been made.
+pub const MAX_ITERS_DEFAULT: usize = 300;
+
 impl Default for NewtonConfig {
     fn default() -> Self {
         Self {
-            max_iters: 100,
+            max_iters: MAX_ITERS_DEFAULT,
             abstol: 1e-12,
             reltol: 1e-9,
             max_damping_halvings: 0,
@@ -1156,11 +1180,53 @@ mod tests {
             crate::testutil::JunctionOverride { inner: &r2 },
         );
         let wrapped: [&dyn ModelInstance; 3] = [&wvs, &wr1, &wr2];
-        let throttled = solve(&wrapped, 3, NewtonConfig::default());
+        // At SPICE's 100 iterations, as this test was written against: the default rose to 300
+        // in 2.49.0, and a 50 V node at ~0.2 V an iteration then arrives just inside it.
+        let throttled = solve(
+            &wrapped,
+            3,
+            NewtonConfig {
+                max_iters: 100,
+                ..NewtonConfig::default()
+            },
+        );
         assert!(
             throttled.is_err(),
             "blanket junction limiting was expected to throttle this to a non-convergence; it              returned {throttled:?} -- if that stopped being true, this test no longer              demonstrates why `unknown_is_junction` exists"
         );
+    }
+
+    /// **The 300-iteration budget** (2.49.0, [`MAX_ITERS_DEFAULT`]). A diode between two
+    /// resistors off a 40 V supply: both its terminals are junction unknowns, and both settle
+    /// near 20 V, which per-unknown limiting reaches only ~0.15 V at a time. SPICE's 100
+    /// iterations are not enough to walk there; the default is.
+    #[test]
+    fn a_junction_node_far_from_ground_converges_within_the_default_budget() {
+        let vs = VSource::new(0, GROUND, 3, 40.0);
+        let r1 = Resistor::new(0, 1, 1000.0);
+        let d = Diode::new(1, 2, 1e-14, 1.0, VT_NOMINAL);
+        let r2 = Resistor::new(2, GROUND, 1000.0);
+        let insts: [&dyn ModelInstance; 4] = [&vs, &r1, &d, &r2];
+
+        let short = solve(
+            &insts,
+            4,
+            NewtonConfig {
+                max_iters: 100,
+                ..NewtonConfig::default()
+            },
+        );
+        assert!(
+            short.is_err(),
+            "expected 100 iterations to be too few, got {short:?}"
+        );
+        let x = solve(&insts, 4, NewtonConfig::default()).expect("converges within 300");
+        // KCL: the same current through both resistors and the diode.
+        let i = (40.0 - x[1]) / 1000.0;
+        assert!((x[2] / 1000.0 - i).abs() < 1e-9, "{x:?}");
+        let vd = x[1] - x[2];
+        assert!(vd > 0.6 && vd < 0.8, "diode drop {vd}");
+        assert!(x[2] > 19.0, "V(cathode) = {}", x[2]);
     }
 
     /// The other half: an unknown that *is* a junction still gets limited, and that limiting is
@@ -1364,9 +1430,16 @@ mod tests {
         // Asserted as "fails", not as one named variant: which way the walk comes apart is a
         // property of the platform's floating point, not of this solver — `dc.rs`'s sibling
         // pinned `Singular` and went red on macOS while Linux and Windows stayed green.
+        //
+        // Pinned at SPICE's 100 iterations, the default this was written against: at 2.49.0's
+        // 300 (`MAX_ITERS_DEFAULT`) plain Newton walks this chain all the way.
+        let spice_budget = NewtonConfig {
+            max_iters: 100,
+            ..NewtonConfig::default()
+        };
         assert!(
-            solve(&insts, dim, NewtonConfig::default()).is_err(),
-            "expected plain Newton to fail within the default iteration budget"
+            solve(&insts, dim, spice_budget).is_err(),
+            "expected plain Newton to fail within 100 iterations"
         );
 
         let cfg_with_gmin = NewtonConfig {

@@ -289,6 +289,26 @@ terminal-voltage limiting (`fetlim`/`limvds`; PSP103 declares no `$limit`). And 
 iteration bound and early-failure test, tuned on the full suite including c5315, c6288 and c7552,
 which were not measured.
 
+## 12. Junction limiting on the junction, not on the node
+
+**What.** Clamp a junction's *voltage* (`V(bi) − V(ei)`), as SPICE's `pnjlim` does, instead of
+each junction-marked unknown's potential to ground. Interface β would gain a way for an instance
+to name its junction pairs, either a default method listing `(p, n)` local-unknown pairs or
+`va_ir::Module::limited_junctions` carrying pairs. Then `va-core` would limit the difference and
+spread the correction over the two nodes.
+
+**Why.** Today a junction node is clamped on its absolute potential: above `vcrit`, every upward
+step is cut to `vt·ln(1 + ΔV/vt)` ≈ 0.15 V. A BJT collector at 7.9 V then walks there over ~50
+iterations. A compiled model with an `exp` and no `$limit` marks every node a junction, so this
+hits every such BJT. It made the 101-circuit reproducers C1 and C2 fail at the old 100-iteration
+budget. 2.49.0 raised the budget to 300 (`va_core::newton::MAX_ITERS_DEFAULT`), which treats the
+symptom: the walk still costs the iterations.
+
+**Cost and dependencies.** A §6 change to Interface β (a default method, so no implementor breaks),
+plus `va-codegen` reporting pairs from `$limit` and from its `exp`-argument fallback. Every
+rescued or slowly converging DC solve with junction models changes path, and possibly its last
+digits; a multistable circuit could land on another state, so deck-diff will not be a no-op.
+
 ## Not planned, and why
 
 - **Verilog-AMS mixed-signal** (`connectmodule`, discrete events, `wreal`) — excluded by

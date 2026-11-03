@@ -22,6 +22,38 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.49.0 - 2026-11-03
+-------------------
+**DC Newton budget 100 -> 300 iterations** (`va_core::newton::MAX_ITERS_DEFAULT`). This fixes
+101-circuits C1 (Darlington with a PNP load, `.op` E0601) and C2 (Schmitt trigger `.dc`, E0601 at
+the fold, VIN = 1.75 V).
+  * Root cause: junction limiting here is per *unknown*, so a junction node is clamped on its
+    potential to ground, not on the voltage across its junction. Above `vcrit`, every upward step
+    of such a node is compressed to vt*ln(1 + dV/vt), about 0.15 V. A compiled model with an `exp`
+    and no `$limit` marks every node a junction (the fallback guess), collector included. C1's
+    output node walks to 7.9 V at 0.15 V per iteration and converges at iteration 143; the gmin
+    rescue never got there either, since its first stage stalls the same way.
+  * Results: C1 V(out) = 7.93842 V against QSPICE 7.93867 V (3e-5; a one-off check against a
+    scratch QSPICE deck, not a golden), and V(e1) agrees to 6 digits. C2 sweeps all 2501 points
+    and jumps branch at VIN = 1.750 V, where the report puts the fold. All 8 C reproducers now run.
+  * Why raise the budget rather than fix the limiter: the real fix is to limit junction
+    *differences*. That needs Interface beta to say which unknown pairs form a junction (today it
+    has only the per-unknown `unknown_is_junction`), which is a section 6 change. Recorded as open.
+  * Cost: a solve that converged by iteration 100 is untouched, bit for bit, and so is one that
+    fails another way (c432's plain solve fails singular at iteration 3; its .op is unchanged). A
+    solve that does not converge now spends 200 more iterations before the gmin rescue starts, and
+    the rescue's per-stage budget (max of this and 150) grows with it.
+  * Two va-core tests whose fixture had to defeat plain Newton (20 diodes in series at 20 V) now
+    converge plainly at 300. They are pinned to max_iters 100, the budget they were written
+    against. A new test shows a diode between resistors on a 40 V supply failing at 100 and solving
+    at 300.
+  * Figures: cargo test --workspace 1047 passed, 0 failed; xtask validate 31/31.
+    deck-diff against 2.48.0, per deck, 240 s cap each: at commit time 17 of 171 decks were done.
+    14 were identical and 3 were ISCAS decks that hit the cap (c432_seq, c432_tran, c7552). There
+    were no differences. The rest was still running and is NOT covered by this entry.
+    The 28 reproducers: all 8 C decks now run; A and D unchanged.
+
+
 2.48.0 - 2026-11-03
 -------------------
 **Transient stall watchdog: E0609** (101-circuits report, D12/D13/D14; they ran for hours with
