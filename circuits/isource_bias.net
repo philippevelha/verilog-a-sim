@@ -1,0 +1,10 @@
+* Independent current source, DC (2.47.0): a 0.5 mA source and a 2 V source on one divider.
+* SPICE direction: `I1 gnd mid` pushes its current into `mid`.
+* Expected by superposition: Thevenin at mid is 2 V * 2k/3k = 1.3333 V behind 666.67 Ohm,
+*   so V(mid) = 1.3333 + 0.5m * 666.67 = 1.6667 V and I(V1) = -(2 - 1.6667)/1k = -0.3333 mA.
+V1 in  gnd  DC 2
+R1 in  mid  1000
+R2 mid gnd  2000
+I1 gnd mid  DC 0.5m
+.op
+.end

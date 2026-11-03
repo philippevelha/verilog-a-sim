@@ -1,0 +1,8 @@
+* Independent current source, AC (2.47.0): a 1 A small-signal current into a parallel RC.
+* Expected: V(out) = R/(1 + jwRC), the network's impedance: 1000 Ohm (60 dB) below the
+*   corner at f = 1/(2*pi*RC) = 159.15 Hz, falling at -20 dB/decade with phase toward -90 deg.
+I1 gnd out  DC 0 AC 1
+R1 out gnd  1000
+C1 out gnd  1e-6
+.ac dec 10 1 1meg
+.end

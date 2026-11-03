@@ -7,7 +7,9 @@
 //! three-terminal model-referencing device, e.g. a MOSFET — `` M<name> d g s model ``, no
 //! separate body/bulk terminal in v0, § ladder rung 5), `Q` (a three-terminal model-referencing
 //! device, a BJT — `` Q<name> c b e model ``, SPICE's own collector/base/emitter order, no
-//! substrate terminal in v0, § ladder rung 6), and `V` (voltage source). Net `0`/`gnd`
+//! substrate terminal in v0, § ladder rung 6), `V` (voltage source) and `I` (current source,
+//! 2.47.0: the same trailing syntax as `V`; `I1 p n 1m` drives 1 mA from `p` through the source
+//! to `n`, and like a `V` it claims a branch row, so `I(I1)` is reported). Net `0`/`gnd`
 //! `X` places a compiled Verilog-A model with **any** number of ports,
 //! `` X<name> <node>... <model> [param=value]... `` — the general instantiation form, since every
 //! other device letter fixes its terminal count. The model name trails the node list, as a
@@ -17,8 +19,8 @@
 //! `[-1, 1]`.
 //! `F` (current-controlled current source) and `H` (current-controlled voltage source) take
 //! two nodes, the *name* of an element whose branch current controls them, and a gain or
-//! transresistance. That element must be one that owns a branch row (a `V` source, an `L`, an
-//! `E` or an `H`) — the same restriction SPICE has, and the reason its decks conventionally
+//! transresistance. That element must be one that owns a branch row (a `V` or `I` source, an
+//! `L`, an `E` or an `H`) — the same restriction SPICE has, and the reason its decks conventionally
 //! insert a 0 V source purely to sense a current.
 //! `E` (voltage-controlled voltage source) and `G` (voltage-controlled current source) take
 //! four nodes — the driven pair then the controlling pair — and a gain/transconductance.
@@ -270,7 +272,7 @@ fn parse_param_overrides(
 /// the zoo happens to name a net that way.
 fn pulse_numbers(line: &str) -> Option<Vec<f64>> {
     let toks: Vec<&str> = line.split_whitespace().collect();
-    if !toks.first()?.starts_with(['V', 'v']) {
+    if !toks.first()?.starts_with(['V', 'v', 'I', 'i']) {
         return None;
     }
     let spec = toks.get(3)?;
@@ -816,7 +818,10 @@ fn parse_device(
                 spice_names: false,
             })
         }
-        'V' => {
+        // `I<name> p n [DC] value [AC mag [phase]] [SIN(...)|PULSE(...)|PWL(...)]` (2.47.0):
+        // the same trailing syntax as `V`, read by the same functions. SPICE's direction: the
+        // current flows from `p` through the source to `n`, so `I1 0 a 1m` pushes 1 mA into `a`.
+        'V' | 'I' => {
             need(3)?;
             let p = intern(net, toks[1]);
             let n = intern(net, toks[2]);
@@ -825,7 +830,7 @@ fn parse_device(
             let ac = parse_source_ac(&toks[3..]);
             Ok(Device {
                 name,
-                model: "vsource".to_string(),
+                model: if kind == 'V' { "vsource" } else { "isource" }.to_string(),
                 terminals: vec![p, n],
                 value: Some(value),
                 waveform,
@@ -1534,6 +1539,43 @@ R1 a 0 1k
             };
             assert_eq!((line, diag.code().as_str()), (3, "E0534"), "{bad}");
         }
+    }
+
+    /// An `I` line reads exactly like a `V` line (value, `AC`, waveform, `PULSE` defaults), as
+    /// an `isource` — the 101-circuits report's A3, where it was E0513.
+    #[test]
+    fn current_sources_parse_like_voltage_sources() {
+        let net = parse(
+            "I1 0 a DC 1m AC 1 90
+I2 a b PULSE(0 2m 1u)
+I3 b 0 SIN(0 1m 1k)
+I4 0 b 5u
+             R1 a 0 1k
+R2 b 0 1k
+.tran 1u 1m
+.end
+",
+        )
+        .expect("parses");
+        let i: Vec<&Device> = net
+            .devices
+            .iter()
+            .filter(|d| d.model == "isource")
+            .collect();
+        assert_eq!(i.len(), 4);
+        assert_eq!(i[0].value, Some(1e-3));
+        assert_eq!(i[0].terminals, vec![GROUND, net.nodes["a"]]);
+        assert_eq!(
+            i[0].ac.map(|a| (a.magnitude, a.phase_deg)),
+            Some((1.0, 90.0))
+        );
+        assert!(matches!(
+            i[1].waveform,
+            Some(Waveform::Pulse { v2, tr, pw, .. }) if v2 == 2e-3 && tr == 1e-6 && pw == 1e-3
+        ));
+        assert!(matches!(i[2].waveform, Some(Waveform::Sin { .. })));
+        // `5u` is 5 × 1e-6, which is not bit-equal to the literal `5e-6`.
+        assert!(i[3].value.is_some_and(|v| (v - 5e-6).abs() < 1e-18));
     }
 
     /// `.tran`'s `tstart` and `tmax` are noted when present; `UIC` among them is not a field,

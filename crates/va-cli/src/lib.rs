@@ -2329,7 +2329,7 @@ fn solve_dc_sweep_impl(
         .ok_or_else(|| {
             va_diag::Diagnostic::new(va_diag::codes::E0718).arg("name", &sweep.source)
         })?;
-    if src.model != "vsource" {
+    if src.model != "vsource" && src.model != "isource" {
         return Err(va_diag::Diagnostic::new(va_diag::codes::E0719)
             .arg("name", &sweep.source)
             .arg("model", &src.model)
@@ -2522,6 +2522,74 @@ impl ModelInstance for WaveformSource {
     /// every accepted step, so the next corner is enough.
     fn events(&self, _x: &[f64], ctx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
         if let Some(t) = next_corner(&self.waveform, ctx.time) {
+            sink.breakpoint(t);
+        }
+    }
+}
+
+/// An independent current source (an `I` line, 2.47.0): `value` amps, or its `waveform`
+/// in time, flowing from `p` through the source to `n` (SPICE's direction).
+///
+/// It carries its current as an unknown on its own branch row, `i − I(t) = 0`, and stamps that
+/// unknown into the two KCL rows exactly as [`VSource`] does. A current source needs no such
+/// row — the classic MNA stamp is `±I` straight into the right-hand side — but with one, every
+/// path written for a source's branch row works for it unchanged: the AC stimulus goes on that
+/// row ([`ac_excitation`]), so the small-signal current is the `AC` magnitude; a `.dc` sweep
+/// re-points it like a `V`; a `.noise` card can name it as its input (input-referred noise is
+/// then in A²/Hz); `I(I1)` is reported; and a waveform's corners are registered as breakpoints.
+/// The cost is one unknown per source and a row whose answer is known in advance.
+///
+/// Stateless, like [`WaveformSource`]: outside transient `ctx.time` is 0 and a waveform gives
+/// its `t = 0` value, which is the DC value the parser derived.
+struct CurrentSource {
+    terminals: [usize; 3], // [p, n, branch-current]
+    value: f64,
+    waveform: Option<va_netlist::Waveform>,
+}
+
+impl ModelInstance for CurrentSource {
+    fn unknowns(&self) -> &[usize] {
+        &self.terminals
+    }
+
+    fn unknown_kind(&self, i: usize) -> va_abi::UnknownKind {
+        if i == 2 {
+            va_abi::UnknownKind::Branch
+        } else {
+            va_abi::UnknownKind::Node
+        }
+    }
+
+    fn load(
+        &self,
+        x: &[f64],
+        ctx: &va_abi::AnalysisCtx,
+        _state: &mut va_abi::ModelState,
+        sink: &mut dyn va_abi::StampSink,
+    ) {
+        let [p, n, b] = self.terminals;
+        let value = match &self.waveform {
+            Some(w) => waveform_value(w, ctx.time),
+            None => self.value,
+        };
+        let ib = x.get(b).copied().unwrap_or(0.0);
+        // Branch row: i − value = 0, the same sign convention as `VSource`'s constraint
+        // (residual = f(x) − value), so an AC stimulus on it means the same thing.
+        sink.residual(b, ib - value);
+        sink.jacobian(b, b, 1.0);
+        // The current leaves `p` into the source and enters the circuit at `n`.
+        sink.residual(p, ib);
+        sink.residual(n, -ib);
+        sink.jacobian(p, b, 1.0);
+        sink.jacobian(n, b, -1.0);
+    }
+
+    fn events(&self, _x: &[f64], ctx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
+        if let Some(t) = self
+            .waveform
+            .as_ref()
+            .and_then(|w| next_corner(w, ctx.time))
+        {
             sink.breakpoint(t);
         }
     }
@@ -3339,6 +3407,21 @@ fn build_instance(
             }),
             None => Box::new(VSource::new(p, n, branch, dev.value.unwrap_or(0.0))),
         };
+        return Ok((inst, Some(branch), Vec::new()));
+    }
+
+    if dev.model == "isource" {
+        let (p, n) = two_terminals()?;
+        // A branch row of its own, like a `V` (see `CurrentSource`): one unknown per source, and
+        // in return `I(I1)`, AC excitation, `.dc` re-pointing and the noise input all take the
+        // voltage source's paths unchanged.
+        let branch = *next_unknown;
+        *next_unknown += 1;
+        let inst: Box<dyn ModelInstance> = Box::new(CurrentSource {
+            terminals: [p, n, branch],
+            value: dev.value.unwrap_or(0.0),
+            waveform: dev.waveform.clone(),
+        });
         return Ok((inst, Some(branch), Vec::new()));
     }
 
@@ -6391,6 +6474,54 @@ R2 out gnd 10k
     /// from rest with no way to say otherwise, was a trap rather than a simplification.
     ///
     /// The two readings differ by the whole 5 V swing, so nothing here turns on a tolerance.
+    /// An `I` source (2.47.0) sweeps under `.dc` like a `V` (re-pointed on its own branch
+    /// row), and serves as a `.noise` input: on a lone resistor the output PSD is `4kTR` and,
+    /// referred to the current input through a gain of `R` V/A, `4kT/R` A²/Hz — the resistor's
+    /// own Norton noise current, which is the textbook answer.
+    #[test]
+    fn a_current_source_sweeps_and_refers_noise_like_a_voltage_source() {
+        let net = va_netlist::parser::parse(
+            "I1 0 a DC 0
+R1 a 0 2k
+.dc I1 0 1m 0.25m
+.end
+",
+        )
+        .expect("parses");
+        let sweep = net.dc.clone().expect("a .dc card");
+        let points = solve_dc_sweep(&net, &[], &sweep).expect("sweeps");
+        let a = net.nodes["a"];
+        assert_eq!(points.len(), 5);
+        for (i, op) in &points {
+            assert!(
+                (op.x[a] - 2e3 * i).abs() < 1e-12,
+                "I1 = {i}: V(a) = {}",
+                op.x[a]
+            );
+        }
+
+        let net = va_netlist::parser::parse(
+            "I1 0 out DC 0 AC 1
+R1 out 0 1k
+.noise V(out) I1 dec 1 1k 10k
+.end
+",
+        )
+        .expect("parses");
+        let spec = solve_noise(&net, &[]).expect("noise");
+        let four_kt = 4.0 * 1.380_649e-23 * va_abi::noise::TEMP_NOMINAL;
+        for (out, inp) in spec.psd.iter().zip(&spec.input_psd) {
+            assert!(
+                ((out - four_kt * 1e3) / (four_kt * 1e3)).abs() < 1e-9,
+                "output {out}"
+            );
+            assert!(
+                ((inp - four_kt / 1e3) / (four_kt / 1e3)).abs() < 1e-9,
+                "input {inp}"
+            );
+        }
+    }
+
     /// `.ic` (2.46.0, the 101-circuits report's A2), both ways SPICE applies it, on a two-stage
     /// RC whose answer is known independently (scipy `solve_ivp`, rtol 1e-10: at 1 ms
     /// V(c) = 2.975035, V(d) = 2.094845 from V(c) = 0, V(d) = 2).

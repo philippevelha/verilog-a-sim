@@ -1,0 +1,9 @@
+* Independent current source, transient (2.47.0): a 1 mA current pulse into a parallel RC.
+* R = 1 kOhm, C = 1 uF (RC = 1 ms). The pulse rises at 0.5 ms over 10 us, holds 2 ms, falls.
+* Expected: V(out) charges toward 1 mA * 1k = 1 V with tau = 1 ms (0.865 V by the end of the
+*   plateau), then decays with the same tau.
+I1 gnd out  PULSE(0 1m 0.5m 10u 10u 2m 10m)
+R1 out gnd  1000
+C1 out gnd  1e-6
+.tran 20u 5m UIC
+.end

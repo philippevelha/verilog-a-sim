@@ -22,6 +22,27 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.47.0 - 2026-11-03
+-------------------
+**Independent current sources: `I` lines** (101-circuits report, A3; was E0513). The syntax is
+the same as `V` and is read by the same code (`DC`, bare value, `AC mag [phase]`, `SIN`, `PULSE`,
+`PWL`, `PULSE` defaults). SPICE's direction applies: `I1 0 a 1m` pushes 1 mA into `a`.
+  * Design choice: each `I` claims a branch row of its own (`i - I(t) = 0`, ±i on its terminals'
+    KCL rows), as a `V` does, instead of the classic RHS-only stamp. It costs one unknown per
+    source. In return the AC stimulus, `.dc` re-pointing (`.dc I1 ...` now sweeps; E0719 rev 2),
+    `.noise` input referral (in A^2/Hz), `I(I1)` reporting, `F`/`H` sensing and waveform
+    breakpoints all take the voltage source's paths unchanged.
+  * The source is built in va-cli (`CurrentSource`), not va-abi, so no frozen interface changed.
+  * Three new QSPICE gates: isource_bias (.op, 4.9e-16), isource_rc (.tran PULSE, 4.0e-4 /
+    tol 1e-3) and isource_ac (|mag| 1.3e-15). The transient figure comes from the pulse edges:
+    the Thevenin-equivalent V deck gives bit-identical points. QSPICE agrees I(I1) = +0.5 mA, so
+    the current direction matches.
+  * Found while regenerating goldens: QSPICE now gives different values in the first few
+    timepoints of rc_step_hv and rectifier (its own edge step placement, presumably a QSPICE
+    update). They were not rewritten here; the committed files still pass.
+  * cargo test --workspace: 1044 passed, 0 failed; clippy clean; xtask validate 31/31.
+
+
 2.46.0 - 2026-11-03
 -------------------
 **`.ic V(net)=value` is implemented** (101-circuits report, A2), with SPICE's two meanings:

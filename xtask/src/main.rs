@@ -117,6 +117,7 @@ const DC_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/divider_hv.net", None),
     ("circuits/vcvs_amp.net", None),
     ("circuits/cccs_mirror.net", None),
+    ("circuits/isource_bias.net", None),
     ("circuits/mos_dc.net", Some("models/mosfet.va")),
 ];
 
@@ -136,6 +137,7 @@ const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rc_discharge.net", None),
     ("circuits/rlc_ring.net", None),
     ("circuits/rl_decay.net", None),
+    ("circuits/isource_rc.net", None),
     ("circuits/rectifier.net", Some("models/diode.va")),
     ("circuits/ring_osc.net", None),
     ("circuits/abstime_ramp.net", Some("models/abstime_ramp.va")),
@@ -155,6 +157,7 @@ const AC_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rc_ac.net", None),
     ("circuits/rc_ac_lin.net", None),
     ("circuits/rc_ac_oct.net", None),
+    ("circuits/isource_ac.net", None),
     ("circuits/diode_ac.net", Some("models/diode.va")),
     ("circuits/laplace_ac.net", Some("models/laplace_lowpass.va")),
 ];
@@ -595,6 +598,7 @@ const QSPICE_NATIVE_CIRCUITS: &[&str] = &[
     "circuits/divider_hv.net",
     "circuits/vcvs_amp.net",
     "circuits/cccs_mirror.net",
+    "circuits/isource_bias.net",
 ];
 
 /// QSPICE-native `.model` card translations for the single-`.op`-point circuits (§ ladder rung 5)
@@ -634,6 +638,7 @@ const QSPICE_NATIVE_TRAN_CIRCUITS: &[&str] = &[
     "circuits/rc_discharge.net",
     "circuits/rlc_ring.net",
     "circuits/rl_decay.net",
+    "circuits/isource_rc.net",
 ];
 
 /// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.tran` transient circuits (§ ladder rungs
@@ -733,6 +738,7 @@ const QSPICE_NATIVE_AC_CIRCUITS: &[&str] = &[
     "circuits/rc_ac.net",
     "circuits/rc_ac_lin.net",
     "circuits/rc_ac_oct.net",
+    "circuits/isource_ac.net",
 ];
 
 /// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.ac` circuits (T5) that reference a custom

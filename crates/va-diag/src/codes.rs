@@ -759,7 +759,7 @@ pub const E0717: Code = Code::new("E0717");
 /// `.dc` sweeps unknown device `{name}`
 pub const E0718: Code = Code::new("E0718");
 
-/// `.dc` can only sweep a voltage source; `{name}` is a `{model}`
+/// `.dc` can only sweep an independent source (`V` or `I`); `{name}` is a `{model}`
 pub const E0719: Code = Code::new("E0719");
 
 /// AC analysis needs at least one source with an `AC <magnitude>` spec; none of this deck's {count} voltage source(s) has one

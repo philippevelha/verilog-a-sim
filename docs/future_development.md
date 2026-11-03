@@ -243,7 +243,8 @@ filter's own `T` and a breakpoint per sample instant.)
 ## 9. Netlist and usability
 
 - SPICE `.subckt`/`.ends`, `.include`, `.param`/expressions, `.model` cards (parameters go
-  on the device line today), `I` current sources, `PWL`/`EXP` sources, `.ic`/`UIC`, multi-source
+  on the device line today), ~~`I` current sources~~ (2.47.0), `PWL`/`EXP` sources,
+  ~~`.ic`/`UIC`~~ (`UIC` earlier, `.ic` 2.46.0), multi-source
   and nested `.dc` sweeps, `.step`.
 - A `--json` report for tooling; `--plot` improvements (item 2).
 - A Python binding (`pyo3` is pure Rust and admissible) so the simulator can be driven from
