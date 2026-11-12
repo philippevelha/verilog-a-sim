@@ -165,6 +165,10 @@ fn print_usage() {
                                  VA_BTF=off solves DC and transient steps with faer's
                                  sparse LU alone instead of trying the block-triangular
                                  solver first.
+                                 VA_ABSDELAY_POINTS=<n> sets how many past samples each
+                                 absdelay() keeps in a transient run (default 512): its
+                                 history is no finer than delay/(n-3), so a signal that
+                                 varies faster than that inside a long delay needs more.
          --reltol <x>            Transient step control's relative truncation-error
                                  tolerance. Default 1e-3. Looser = fewer timepoints,
                                  and results NOT re-validated against golden.

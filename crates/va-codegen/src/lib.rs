@@ -2066,7 +2066,9 @@ impl GeneratedModel {
     /// that changed since the first timepoint, or a history that no longer reaches `t − tau`
     /// (which the thinning rule makes unreachable; checked rather than assumed).
     fn absdelay_at(ctx: &Ctx, site: u32, tau: f64, u: f64) -> Result<Delayed, String> {
-        use lower::{ABSDELAY_HEAD as H, ABSDELAY_POINTS as N};
+        use lower::ABSDELAY_HEAD as H;
+        #[allow(non_snake_case)]
+        let N = lower::absdelay_points();
         let Some(&(_, base)) = ctx.state_slots.get(&site) else {
             return Err("absdelay: internal error, no state slots for this call".into());
         };

@@ -22,6 +22,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.54.0 - 2026-11-11
+-------------------
+**`VA_ABSDELAY_POINTS=<n>` sets the size of `absdelay`'s transient history** (default 512, as
+before; 16 to 1048576; read once per process). Without the variable nothing changes.
+  * Why: the history keeps samples no closer than delay/(n-3). A 10 GHz tone through a 5 ns
+    delay (an opto-electronic oscillator's loop, `paper_writing/mwp/tests/t04_oeo.py`) is then
+    stored every 9.8 ps and comes out 3.3 % low; the interpolation bound (w h)^2/12 is 3.2 %.
+    Measured with 2048 samples: 0.30 % low; with 4096: 0.12 %.
+  * Why a knob and not a larger default: each sample is two state slots that the integrator
+    copies at every evaluation. The same run took 0.23 s at 512, 0.41 s at 2048 and 0.84 s at
+    4096 (single runs). At 16384 the oscillator deck was stopped unfinished after more than 20 minutes.
+  * Why an environment variable: the ring size fixes each model's state layout when it is
+    lowered, before any deck is read. A per-call size needs `maxdelay` carried through
+    Interface alpha, which is the section 6 change 2.44.0 already declined.
+  * Not solved: a delay holding 1e5 RF periods (a kilometre of fibre under a 10 GHz subcarrier)
+    is out of reach at any practical n. Higher-order interpolation would cut the error to
+    order (w h)^4 at the same n; not done.
+  * Docs: va-cli --help, token-reference (absdelay row), interfaces.md and va-abi state notes.
+  * Figures: `cargo test --workspace` 1053 passed, 0 failed (two new, both from 2.53.1);
+    `cargo xtask validate` 33 checked, 0 failed, convergence 33/33; clippy and fmt clean.
+  * The `paper_writing/mwp` files named in this entry and in 2.53.1 are not in the repository
+    yet (the library is uncommitted); the measurements were made with them.
+
+
 2.53.1 - 2026-11-11
 -------------------
 **`.noise` follows frequency-dependent models** (`absdelay`, `laplace_*`, `zi_*`). Until now the

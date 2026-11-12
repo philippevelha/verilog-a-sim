@@ -1086,6 +1086,25 @@ pub const TRANSITION_PENDING: usize = 7;
 /// every evaluation, so the number is a trade between resolution and per-iteration cost.
 pub const ABSDELAY_POINTS: usize = 512;
 
+/// The ring size in force for this process: [`ABSDELAY_POINTS`], or the environment variable
+/// `VA_ABSDELAY_POINTS` (2.54.0; clamped to 16..=1048576, read once).
+///
+/// Why a knob: the default resamples a long delay at `delay / 509`, which is fine for a slow
+/// signal through a long delay and wrong for a fast one. A 10 GHz tone through a 5 ns delay
+/// (an opto-electronic oscillator's loop) is stored at 9.8 ps spacing, and linear
+/// interpolation then loses up to `(ω·h)²/8` = 4.8 % of its amplitude. Each sample costs two
+/// state slots that the integrator copies at every evaluation, so a larger ring is slower;
+/// that is the reason it is not simply large by default. An unparseable value is ignored.
+pub fn absdelay_points() -> usize {
+    static POINTS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *POINTS.get_or_init(|| {
+        std::env::var("VA_ABSDELAY_POINTS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(ABSDELAY_POINTS, |n| n.clamp(16, 1 << 20))
+    })
+}
+
 /// The state slots of an `absdelay` site before its sample ring: `(tau, count, head, t_tail,
 /// v_tail, t_first, v_first)`, `tau` being the delay as fixed at the start of the run. The tail is the last accepted point, always kept;
 /// the ring holds the thinned history before it.
@@ -1148,7 +1167,7 @@ impl StatefulKind {
             // method-agnostic.
             StatefulKind::Ddt => 3,
             StatefulKind::IdtReset { .. } => 3,
-            StatefulKind::Absdelay => ABSDELAY_HEAD + 2 * ABSDELAY_POINTS,
+            StatefulKind::Absdelay => ABSDELAY_HEAD + 2 * absdelay_points(),
         }
     }
 }

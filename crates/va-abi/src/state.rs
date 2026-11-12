@@ -50,7 +50,8 @@
 //! It is **fixed-size**. A construct needing a trajectory — `absdelay`, which must produce
 //! `value(t − delay)` from however many samples the LTE controller happened to place inside the
 //! delay window — has to bound its own history to fit. `va-codegen` does (2.44.0): a fixed ring
-//! of samples thinned to `delay / 509` spacing, so the window always fits and the cost is
+//! of samples thinned to `delay / 509` spacing (`delay / (n − 3)` with `VA_ABSDELAY_POINTS=n`,
+//! 2.54.0), so the window always fits and the cost is
 //! resolution, not overflow. See `docs/proposals/absdelay.md` stage 2.
 //!
 //! It is also **not the Newton-iterate channel** `$limit` wants. That construct needs the

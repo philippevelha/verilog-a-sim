@@ -718,7 +718,8 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > - **`absdelay`** needs an unbounded interpolated **trajectory**, which no fixed-size state
 >   vector holds. A second design; the channel is shaped not to preclude it. *(2.44.0: built on
 >   this channel after all, by bounding the history instead: a fixed ring thinned to
->   `delay / 509` spacing, `docs/proposals/absdelay.md` stage 2.)*
+>   `delay / 509` spacing, `docs/proposals/absdelay.md` stage 2. 2.54.0: the ring size is
+>   `VA_ABSDELAY_POINTS`, default 512, fixed per process — still a fixed-size state.)*
 > - **True event-scheduled `transition`** — approximated here via `bound_step` rather than exact
 >   corner breakpoints, and `docs/token-reference.md` says so at the construct.
 
