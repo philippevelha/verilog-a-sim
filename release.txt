@@ -22,6 +22,33 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.53.1 - 2026-11-11
+-------------------
+**`.noise` follows frequency-dependent models** (`absdelay`, `laplace_*`, `zi_*`). Until now the
+noise analysis linearized the circuit once, with no frequency, so such a model entered every
+point with its zero-frequency gain: a delay as a wire, a filter as its DC gain. No message.
+`.ac` has re-linearized per point since Tier C (2026-08-07); `.noise` never did.
+  * Found by a laser-linewidth discriminator (`paper_writing/mwp/tests/t03_rf_generation.py`):
+    phase noise through an unbalanced interferometer must give
+    (R P)^2 * 4 sin^2(pi f td) * lw/(pi f^2). The run returned exactly the shot-noise floor.
+    After the fix it matches the closed form to 6.7e-6 from 0.1 MHz to 3 GHz.
+  * Fix, two halves: `va_acnoise::noise::run_with` re-linearizes at each frequency when an
+    instance reports `is_frequency_dependent` (an ordinary circuit still linearizes once), and
+    va-codegen's delay/Laplace/Z stamps take the complex gain in a `Noise` context as well as
+    an `Ac` one. `AnalysisCtx::freq` is now meaningful in both; its doc comment says so. No
+    signature changed.
+  * Cost: a noise sweep over a circuit containing such a model pays one linearization per
+    point, as its AC sweep does.
+  * Scope of the wrong answers: any earlier `.noise` result on a circuit with `absdelay` or a
+    `laplace_*`/`zi_*` filter between a noise source and the output. No committed gate or
+    example has one (the photonic noise decks use no delay), which is why nothing caught it.
+  * Tests: `a_frequency_dependent_instance_is_relinearized_at_every_noise_point` (va-acnoise) and
+    `noise_through_an_absdelay_follows_the_delay` (through the binary: thermal noise into a
+    delayed conductance, 9:1 between f = 1/(2 td) and f = 1/td).
+  * Figures, on this tree: `cargo check --workspace` clean and the two new tests pass. The full
+    suite and the gates were run on the 2.54.0 tree; see that entry.
+
+
 2.53.0 - 2026-11-03
 -------------------
 **`.noise` accepts `oct` and `lin` grids**, as `.ac` has since 2026-08-31 (101-circuits A5; it was

@@ -291,7 +291,9 @@ pub struct AnalysisCtx {
     /// Small-signal frequency in **hertz** — the `ω/2π` a frequency-dependent model needs to
     /// evaluate its own transfer function.
     ///
-    /// Meaningful only when `kind` is [`AnalysisKind::Ac`]; `0.0` in every other analysis, which
+    /// Meaningful only when `kind` is [`AnalysisKind::Ac`] or, since 2.53.1,
+    /// [`AnalysisKind::Noise`] (a noise run is a small-signal solve at each frequency, and
+    /// `va_acnoise::noise::run_with` now re-linearizes per point too); `0.0` in every other analysis, which
     /// is the honest reading for a solve that has no frequency axis rather than a placeholder.
     /// A DC operating point is `s = 0`, so a filter evaluating at `freq = 0.0` correctly reports
     /// its DC gain.

@@ -1557,7 +1557,11 @@ impl GeneratedModel {
                 continue;
             };
             let omega = 2.0 * std::f64::consts::PI * ctx.analysis.freq;
-            let ac = ctx.analysis.kind == va_abi::AnalysisKind::Ac && omega != 0.0;
+            // A noise run is a small-signal solve at this frequency too (2.53.1).
+            let ac = matches!(
+                ctx.analysis.kind,
+                va_abi::AnalysisKind::Ac | va_abi::AnalysisKind::Noise
+            ) && omega != 0.0;
             let transient = ctx.analysis.kind == va_abi::AnalysisKind::Transient;
 
             if !transient {
@@ -1885,7 +1889,11 @@ impl GeneratedModel {
                 continue;
             }
             let omega = 2.0 * std::f64::consts::PI * ctx.analysis.freq;
-            let ac = ctx.analysis.kind == va_abi::AnalysisKind::Ac && omega != 0.0;
+            // A noise run is a small-signal solve at this frequency too (2.53.1).
+            let ac = matches!(
+                ctx.analysis.kind,
+                va_abi::AnalysisKind::Ac | va_abi::AnalysisKind::Noise
+            ) && omega != 0.0;
 
             let h = if let Some(delay) = term.delay {
                 // A pure transport delay: `H(jw) = exp(-jw*tau)`, which is **exact** rather
@@ -3278,7 +3286,8 @@ impl ModelInstance for GeneratedModel {
 
     /// A compiled model is frequency-dependent exactly when its source contains a `laplace_*`
     /// filter: that is the only construct whose `G`/`C` themselves move with `ω`. Reporting it
-    /// is what makes `va_acnoise::ac::run` re-linearize per point — a cost no ordinary model
+    /// is what makes `va_acnoise::ac::run` and, since 2.53.1, `va_acnoise::noise::run`
+    /// re-linearize per point — a cost no ordinary model
     /// should pay, which is why this is opt-in rather than assumed.
     fn is_frequency_dependent(&self) -> bool {
         self.shared.lowered.has_laplace

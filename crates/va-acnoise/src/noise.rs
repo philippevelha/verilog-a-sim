@@ -256,6 +256,12 @@ pub fn run_with(
     // `ac_stim` is deliberately ignored here — an applied stimulus is not a noise source, and
     // this analysis's excitation is the adjoint probe at the output, built below.
     let ctx = va_abi::AnalysisCtx::noise().with_temp(temp);
+    // A frequency-dependent instance (`absdelay`, `laplace_*`, `zi_*`) moves `G`/`C` with
+    // frequency, so the system is linearized again at each point, as `ac::run_with` does.
+    // Until 2.53.1 this function linearized once, with no frequency: such an instance entered
+    // every point with its zero-frequency gain (a delay as a wire), and the spectrum was
+    // wrong without a word. An ordinary circuit still linearizes once.
+    let per_point = instances.iter().any(|i| i.is_frequency_dependent());
     // `true`: the adjoint needs `Aᵀ`, the plain transpose.
     let mut small = SmallSignal::linearize(instances, x_dc, &ctx, dim, solver, true);
     let mut collected = SourceList::default();
@@ -282,6 +288,9 @@ pub fn run_with(
     let mut per_instance: Vec<Vec<f64>> = vec![Vec::with_capacity(f.len()); contributors.len()];
     for &freq in &f {
         let omega = 2.0 * std::f64::consts::PI * freq;
+        if per_point {
+            small.relinearize(instances, x_dc, &va_abi::AnalysisCtx { freq, ..ctx });
+        }
         let y = small.solve(omega, &e_out)?;
 
         let mut buckets = vec![0.0; contributors.len()];
@@ -537,6 +546,56 @@ mod tests {
             .expect("noise solves");
         assert!(spectrum.psd.iter().all(|&p| p == 0.0), "{:?}", spectrum.psd);
         assert_eq!(spectrum.total, 0.0);
+    }
+
+    /// A frequency-dependent instance is linearized again at every noise point (2.53.1).
+    ///
+    /// A 1 kΩ resistor's thermal current into a conductance `g(f) = 1 mS · (1 + f/1 kHz)`:
+    /// the output PSD is `4kT/R · |1/(1/R + g(f))|²`. Linearizing once, with no frequency,
+    /// held `g` at 1 mS and made the spectrum flat — which is what this function did.
+    #[test]
+    fn a_frequency_dependent_instance_is_relinearized_at_every_noise_point() {
+        struct Rising {
+            terminals: [usize; 1],
+        }
+        impl ModelInstance for Rising {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn is_frequency_dependent(&self) -> bool {
+                true
+            }
+            fn load(
+                &self,
+                _x: &[f64],
+                ctx: &va_abi::AnalysisCtx,
+                _st: &mut va_abi::ModelState,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
+                sink.jacobian(0, 0, 1e-3 * (1.0 + ctx.freq / 1e3));
+            }
+        }
+        let r = Resistor::new(0, GROUND, 1e3);
+        let load = Rising { terminals: [0] };
+        let insts: [&dyn ModelInstance; 2] = [&r, &load];
+        let sweep = AcSweep {
+            fstart: 1e3,
+            fstop: 1e5,
+            points: 1,
+            kind: Default::default(),
+        };
+        let spectrum =
+            run_at_nominal_temp(&insts, &[0.0], 1, sweep, 0, None).expect("noise solves");
+        assert_eq!(spectrum.f.len(), 3);
+        let four_kt_over_r = 4.0 * va_abi::noise::BOLTZMANN * va_abi::noise::TEMP_NOMINAL / 1e3;
+        for (&f, &p) in spectrum.f.iter().zip(&spectrum.psd) {
+            let z = 1.0 / (1e-3 + 1e-3 * (1.0 + f / 1e3));
+            let expected = four_kt_over_r * z * z;
+            assert!(
+                (p / expected - 1.0).abs() < 1e-9,
+                "f={f}: psd = {p}, expected {expected}"
+            );
+        }
     }
 
     /// A flicker source must fall a decade in power per decade of frequency, *through the whole

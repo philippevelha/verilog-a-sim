@@ -196,3 +196,39 @@ fn a_runtime_index_out_of_range_reports_an_error() {
         "a guarded read must stay quiet: {out}"
     );
 }
+
+/// `.noise` through an `absdelay` (2.53.1). R1's thermal current sees
+/// `Z = R1 / (1 + (R1/r)·exp(-jω·td))`, so with R1/r = 0.5 the output PSD at f = 1/(2·td)
+/// is 9 times its value at f = 1/td. Until 2.53.1 the noise analysis linearized once, with no
+/// frequency, the delay entered as a wire, and the spectrum was flat.
+#[test]
+fn noise_through_an_absdelay_follows_the_delay() {
+    let va = "`include \"disciplines.vams\"
+module dl(p, n); inout p, n; electrical p, n;
+              analog I(p, n) <+ absdelay(V(p, n) / 1000.0, 1e-6);
+endmodule
+";
+    let disc = include_str!("../../../models/disciplines.vams");
+    let deck = "* noise through a delay
+V1 in gnd DC 0 AC 1
+R1 in out 500
+                X1 out gnd dl
+.noise V(out) V1 lin 2 5e5 1e6
+.end
+";
+    let out = run(
+        "noise-delay",
+        &[("dl.va", va), ("disciplines.vams", disc), ("d.net", deck)],
+        &["sim", "d.net", "--model", "dl.va", "--noise"],
+    );
+    let psd: Vec<f64> = out
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("f="))
+        .filter_map(|l| l.split("S=").nth(1))
+        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
+        .collect();
+    assert_eq!(psd.len(), 2, "{out}");
+    let four_kt_r = 4.0 * 1.380649e-23 * 300.15 * 500.0;
+    assert!((psd[0] / (four_kt_r * 4.0) - 1.0).abs() < 1e-5, "{out}");
+    assert!((psd[1] / (four_kt_r / 2.25) - 1.0).abs() < 1e-5, "{out}");
+}
