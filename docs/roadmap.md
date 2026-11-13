@@ -5041,7 +5041,8 @@ to choose, as 2.0's was, and the list below is evidence for that choice, not a p
 7. **Harmonic balance with periodic noise** (added 2026-11-12; proposed, **not ratified**).
    The next section and `docs/proposals/harmonic-balance.md`.
 8. **Displacement current in `I(<port>)` and the branch self-probe** (added 2026-11-13; a
-   correctness fix, **to do**). The section "Displacement current in the current probes" below.
+   correctness fix, **done in 2.56.0**). The section "Displacement current in the current
+   probes" below.
 
 Also still open from before 2.0, in `docs/future_development.md`: a results file, `absdelay` in
 transient (**done in 2.44.0**, constant delay only), Interface β changes (seeded RNG, sensitivities),
@@ -5091,7 +5092,35 @@ cannot serve as that gate; the formula and an independent check have to.
 
 **Status:** nothing built. Waiting on step 0.
 
-## Displacement current in the current probes — to do (2026-11-13)
+## Displacement current in the current probes — done in 2.56.0 (2026-11-13)
+
+**Outcome, 2.56.0.** Both probes report the total current. `I(<port>)`'s fold keeps every term
+(`va-frontend`: the charge filter, the `ddt` taint analysis that fed it and E0374's guard refusal
+are gone); `I(br)`'s accumulator row carries the branch's charge (`-Q` on its charge channel, so
+the row reads `y = R + dQ/dt`). No §6 change, as expected: the in-expression `ddt` (2026-08-31)
+and the charge channel were enough. Step 1 below ("stop the silence") became unnecessary once
+step 2 was done. Gates: the five decks agree with Spectre within 9e-5 of the swing (were 0.30–1.0
+off), `portprobe_dc` unchanged at 0; `crates/va-cli/tests/port_current_probe.rs` checks both
+probes against closed forms in transient, AC (`Y = 1/r + jωC` over six decades) and DC, plus the
+product rule; a codegen test checks the accumulator row's assembled Jacobian against central
+differences. Corpus unchanged, file for file (`check external --codegen` 219/250, `models`
+69/69, before and after); the HICUM `IB = I(<b>);` reads keep building and are unchanged at an
+operating point, where every `ddt` is zero.
+
+**Found on the way, fixed in the same release.** A variable holding a `ddt` could only be
+substituted into a `<+`; read as a value anywhere else (`q = ddt(x); w = 2*q;`) it failed with
+E0413, and if the variable had also been assigned an ordinary value, or the `ddt` sat in an arm
+under a solution-dependent condition, the read **silently returned a stale value or 0**. The
+probe made it matter: `qd = ddt(...); I <+ is*V + qd; ib = I(<a>);` reads `qd` as a value. Now
+such an assignment is also evaluated as an ordinary in-expression `ddt` when its guards are
+time-invariant (`lower::Escaping::read_as_value`), and refused as R0412 when they are not (the
+`<+` spelling of that case was already R0407).
+
+**Still open:** `I(<port>)` inside a `case` arm or a loop, and vector ports (unchanged). The six
+decks are gated only by `compare_zoo.py` against Spectre and by the `va-cli` tests, not by
+`cargo xtask validate`; their QSPICE references (`golden/qspice/`) are still run by hand.
+
+The original plan, kept as the record:
 
 **The defect.** In a transient run, `I(<port>)` (LRM §5.4.3) and the self-probe of a named branch
 `I(br)` report the **conduction current only**: every `ddt` term of the contributions they sum is

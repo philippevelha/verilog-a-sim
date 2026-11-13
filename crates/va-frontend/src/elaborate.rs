@@ -3855,21 +3855,8 @@ impl Elaborator<'_> {
             .get(port)
             .ok_or_else(|| elab(Diagnostic::new(codes::E0306).arg("port", port)))?;
 
-        // Which local variables can carry a `ddt` into a contribution's right-hand side. Computed
-        // once here, over the analog block lowered so far, and threaded down through the fold so
-        // `Self::contains_ddt` can see a `ddt` that arrived through an assignment
-        // (§ `Self::ddt_tainted_vars`).
-        let tainted = self.ddt_tainted_vars();
-
         let mut terms = Vec::new();
-        self.collect_port_flow_contributions(
-            node,
-            port,
-            &self.out.analog.clone(),
-            &[],
-            &tainted,
-            &mut terms,
-        )?;
+        self.collect_port_flow_contributions(node, &self.out.analog.clone(), &[], &mut terms)?;
 
         let mut sum = None;
         for (sign, value) in terms {
@@ -3888,193 +3875,6 @@ impl Elaborator<'_> {
         Ok(sum.unwrap_or_else(|| self.out.push_expr(Expr::Const(0.0))))
     }
 
-    /// Rebuild `expr` from only those top-level additive terms that contain no `ddt` — directly
-    /// or through a `ddt`-tainted variable listed in `tainted` — or `None` if every term did.
-    ///
-    /// # Why `I(<port>)` drops charge terms
-    ///
-    /// A port-current probe folds to the sum of the flow contributions already made to branches
-    /// touching the port's node. Some of those contributions are charge terms — `HICUM`'s base
-    /// node carries `I(br_bci) <+ ddt(qjcx);` alongside its conduction currents. Inlining a
-    /// contribution's raw right-hand side therefore *manufactured* a `ddt` nested inside an
-    /// ordinary assignment (`IB = I(<b>);`), a shape no model wrote and `va-codegen` rightly
-    /// refuses, since `ddt`'s value depends on the whole history of its argument rather than on
-    /// the current unknowns. Six real corpus files failed for this reason with a message
-    /// blaming a nested `ddt` that does not appear anywhere in their source.
-    ///
-    /// **This is an approximation, and a documented one**: the probe reports **conduction
-    /// current only**, omitting displacement current. It is *exact at a DC operating point*
-    /// (where every `ddt` is zero by definition) and an approximation in transient. That is the
-    /// same rule [`va_codegen`'s flow-current accumulator] already applies to a branch
-    /// self-probe `I(branch)`, so `I(<port>)` is now consistent with it rather than being the
-    /// one construct that fails outright. The alternative — evaluating `dQ/dt` — needs the
-    /// integrator's per-term time-stepping coefficient exposed through Interface β, which is a
-    /// coordinated change, not a fold-local one.
-    ///
-    /// The real corpus reads are all operating-point outputs inside `` `ifdef CALC_OP `` blocks
-    /// (`IB = I(<b>);`), where the conduction current is what is wanted anyway.
-    fn resistive_terms_only(&mut self, expr: ExprId, tainted: &HashSet<u32>) -> Option<ExprId> {
-        let mut terms = Vec::new();
-        self.collect_signed_terms(expr, 1.0, &mut terms);
-        let kept: Vec<(f64, ExprId)> = terms
-            .into_iter()
-            .filter(|&(_, e)| !self.contains_ddt(e, tainted))
-            .collect();
-        let mut sum = None;
-        for (sign, e) in kept {
-            let signed = if sign < 0.0 {
-                self.out.push_expr(Expr::Unary(va_ir::UnOp::Neg, e))
-            } else {
-                e
-            };
-            sum = Some(match sum {
-                None => signed,
-                Some(acc) => self
-                    .out
-                    .push_expr(Expr::Binary(va_ir::BinOp::Add, acc, signed)),
-            });
-        }
-        sum
-    }
-
-    /// Flatten `expr` into signed additive terms, pushing `-` through subtraction and unary
-    /// negation — the same flattening `va_codegen::lower::collect_terms` does, repeated here
-    /// because this crate cannot depend on that one (§3's dependency table).
-    fn collect_signed_terms(&self, expr: ExprId, sign: f64, out: &mut Vec<(f64, ExprId)>) {
-        match self.out.expr(expr) {
-            Expr::Binary(va_ir::BinOp::Add, l, r) => {
-                let (l, r) = (*l, *r);
-                self.collect_signed_terms(l, sign, out);
-                self.collect_signed_terms(r, sign, out);
-            }
-            Expr::Binary(va_ir::BinOp::Sub, l, r) => {
-                let (l, r) = (*l, *r);
-                self.collect_signed_terms(l, sign, out);
-                self.collect_signed_terms(r, -sign, out);
-            }
-            Expr::Unary(va_ir::UnOp::Neg, e) => {
-                let e = *e;
-                self.collect_signed_terms(e, -sign, out);
-            }
-            _ => out.push((sign, expr)),
-        }
-    }
-
-    /// Whether `expr` reaches a `ddt` — either syntactically, or through a local variable that
-    /// [`Self::ddt_tainted_vars`] proved can carry one (`tainted` holds those, by `VarId.0`).
-    /// `idt` is deliberately *not* matched: its value is an ordinary read of its accumulator
-    /// unknown, evaluable anywhere.
-    ///
-    /// The variable arm is what makes this scan sound. Without it the scan sees only the shape
-    /// written at the `<+` site, so `qd = ddt(cj*V(a,c)); I(a,c) <+ is*V(a,c) + qd;` looks
-    /// entirely resistive and the charge term survives into `I(<a>)` — the *direct* spelling
-    /// `I(a,c) <+ is*V(a,c) + ddt(cj*V(a,c));` and the through-a-variable spelling of the same
-    /// physics would then disagree about what the probe reports.
-    fn contains_ddt(&self, expr: ExprId, tainted: &HashSet<u32>) -> bool {
-        match self.out.expr(expr) {
-            Expr::Call(va_ir::Builtin::Ddt, _) => true,
-            Expr::ParamGiven(_) | Expr::PortConnected(_) | Expr::EventFired(_) => false,
-            Expr::Var(id) => tainted.contains(&id.0),
-            Expr::Call(_, args) | Expr::CallUser(_, args) => {
-                args.iter().any(|&a| self.contains_ddt(a, tainted))
-            }
-            Expr::Unary(_, e) | Expr::Ddx(e, _) => self.contains_ddt(*e, tainted),
-            Expr::Binary(_, l, r) => {
-                self.contains_ddt(*l, tainted) || self.contains_ddt(*r, tainted)
-            }
-            Expr::Select(c, t, f) => {
-                self.contains_ddt(*c, tainted)
-                    || self.contains_ddt(*t, tainted)
-                    || self.contains_ddt(*f, tainted)
-            }
-            Expr::Const(_) | Expr::Param(_) | Expr::Probe(_) => false,
-        }
-    }
-
-    /// The set of local variables (by `VarId.0`) that can carry a `ddt` into an expression: a
-    /// variable is tainted if *any* `Stmt::Assign` to it anywhere in the analog block lowered so
-    /// far has a right-hand side that syntactically contains a `ddt` or reads an already-tainted
-    /// variable. Iterated to a fixed point, so a chain (`q = ddt(x); s = q; t = 2*s;`) taints
-    /// every link, not just the first. This mirrors `va_codegen::lower::param_only_vars`, whose
-    /// fixed point runs the same way over the same statement set; the logic is repeated here
-    /// because this crate cannot depend on that one (§3's dependency table).
-    ///
-    /// **Deliberately over-approximate, in the safe direction, and not path-sensitive.** Taint is
-    /// a property of the variable across the whole block, never of one program point: after
-    /// `x = ddt(q); x = 0;` the variable `x` stays tainted even though the second assignment
-    /// plainly supersedes the first, and a `ddt` assigned only inside an `if` that never runs
-    /// taints the variable just the same. The safe direction is the *over*-approximating one
-    /// because being wrong here has asymmetric cost: a falsely-tainted term is dropped from
-    /// `I(<port>)`, which understates a conduction current the probe already documents itself as
-    /// approximating (see [`Self::resistive_terms_only`]); a falsely-*clean* term smuggles a
-    /// charge into a probe documented to report conduction current only, silently contradicting
-    /// the direct spelling of the same physics and handing `va-codegen` a `ddt` nested inside an
-    /// ordinary assignment. Path-sensitivity would need a real dataflow lattice over the block's
-    /// control flow, which buys nothing for the corpus shapes this fold exists to serve.
-    fn ddt_tainted_vars(&self) -> HashSet<u32> {
-        let mut assigns = Vec::new();
-        collect_var_assigns(&self.out.analog, &mut assigns);
-
-        let mut tainted: HashSet<u32> = HashSet::new();
-        loop {
-            let mut changed = false;
-            for &(var, rhs) in &assigns {
-                if tainted.contains(&var) {
-                    continue;
-                }
-                if self.contains_ddt(rhs, &tainted) {
-                    tainted.insert(var);
-                    changed = true;
-                }
-            }
-            if !changed {
-                return tainted;
-            }
-        }
-    }
-
-    /// The refusal text for a flow contribution whose enclosing `if` condition `guard` reaches a
-    /// `ddt` (§ port-current probe). Names the construct (`I(<port>)`), the cause, and — when the
-    /// `ddt` arrived through an assignment rather than being written in the condition itself —
-    /// the source-level variable that carries it.
-    ///
-    /// The message names the variable that carries the `ddt`; the line comes from
-    /// [`Self::lower_stmt`], which locates the error at the contribution (2.23.1).
-    fn ddt_guard_message(&self, port: &str, guard: ExprId, tainted: &HashSet<u32>) -> Diagnostic {
-        let via = match self.first_tainted_var(guard, tainted) {
-            Some(id) => match self.vars.iter().find(|(_, v)| **v == id) {
-                Some((name, _)) => format!("through variable `{name}`"),
-                None => "through a local variable".to_string(),
-            },
-            None => "written in the condition itself".to_string(),
-        };
-        Diagnostic::new(codes::E0374)
-            .arg("port", port)
-            .arg("via", via)
-    }
-
-    /// The first `ddt`-tainted local variable reachable in `expr`, for
-    /// [`Self::ddt_guard_message`]. `None` when `expr` reaches a `ddt` only by spelling one out
-    /// directly (`if (ddt(q) > 0)`), with no tainted variable involved.
-    fn first_tainted_var(&self, expr: ExprId, tainted: &HashSet<u32>) -> Option<VarId> {
-        match self.out.expr(expr) {
-            Expr::ParamGiven(_) | Expr::PortConnected(_) | Expr::EventFired(_) => None,
-            Expr::Var(id) if tainted.contains(&id.0) => Some(*id),
-            Expr::Call(_, args) | Expr::CallUser(_, args) => args
-                .iter()
-                .find_map(|&a| self.first_tainted_var(a, tainted)),
-            Expr::Unary(_, e) | Expr::Ddx(e, _) => self.first_tainted_var(*e, tainted),
-            Expr::Binary(_, l, r) => self
-                .first_tainted_var(*l, tainted)
-                .or_else(|| self.first_tainted_var(*r, tainted)),
-            Expr::Select(c, t, f) => self
-                .first_tainted_var(*c, tainted)
-                .or_else(|| self.first_tainted_var(*t, tainted))
-                .or_else(|| self.first_tainted_var(*f, tainted)),
-            Expr::Const(_) | Expr::Param(_) | Expr::Var(_) | Expr::Probe(_) => None,
-        }
-    }
-
     /// Recursively walk `stmts` (a prefix of `self.out.analog`, already fully lowered) for every
     /// `Stmt::Contribute` of [`AccessKind::Flow`] whose branch touches `node`, collecting
     /// `(sign, value)` pairs into `out` — the constant-additive-fold half of
@@ -4085,15 +3885,12 @@ impl Elaborator<'_> {
     /// **not** applied to a contribution outside any `if` (`guards` empty), which counts
     /// unconditionally, matching the direct real-corpus idiom (`external/hicumL0_v2p0p0.va`'s
     /// `IB = I(<b>);`, read after every port-touching branch's contribution already ran
-    /// unconditionally earlier in the same block). `tainted` is [`Self::ddt_tainted_vars`]'s
-    /// result, passed through to [`Self::resistive_terms_only`]; `port` names the probed port,
-    /// for diagnostics only.
+    /// unconditionally earlier in the same block).
     ///
-    /// The value and the guards are the *only* two channels through which anything reaches the
-    /// folded probe expression, and both are screened for `ddt` — the value by dropping its
-    /// charge terms, the guard by refusing outright, since a condition cannot be "partly" kept.
-    /// Together they are what actually enforces [`Self::resistive_terms_only`]'s
-    /// conduction-current-only claim.
+    /// Values and guards are kept whole, `ddt` included (2.56.0): the probe is the total current
+    /// through the port. Until 2.56.0 a value's charge terms were dropped and a guard reaching a
+    /// `ddt` was refused (E0374, now retired), because the probe reported conduction current
+    /// only.
     ///
     /// **Limitation**: a qualifying contribution found inside a `case`/`for`/`while`/`repeat` is
     /// rejected with a clear error rather than silently mis-summed or silently dropped — those
@@ -4103,10 +3900,8 @@ impl Elaborator<'_> {
     fn collect_port_flow_contributions(
         &mut self,
         node: NodeId,
-        port: &str,
         stmts: &[va_ir::Stmt],
         guards: &[ExprId],
-        tainted: &HashSet<u32>,
         out: &mut Vec<(f64, ExprId)>,
     ) -> Result<(), FrontendError> {
         for stmt in stmts {
@@ -4120,25 +3915,16 @@ impl Elaborator<'_> {
                     } else {
                         continue;
                     };
-                    // Keep only the contribution's *resistive* terms. A `ddt(...)` term is a
-                    // charge, and its time derivative is not a value this pipeline can
-                    // evaluate — inlining it here manufactured a `ddt` nested inside an
-                    // ordinary assignment that no model actually wrote (see
-                    // `Self::resistive_terms_only`).
-                    let Some(mut v) = self.resistive_terms_only(*value, tainted) else {
-                        // Every term was a charge term: the branch contributes no conduction
-                        // current at all, so it adds nothing to the probe under this rule.
-                        continue;
-                    };
+                    // The whole right-hand side, charge terms included: the probe reports the
+                    // total current through the port, conduction plus displacement (LRM §5.4.3;
+                    // 2.56.0). A `ddt` reached this way is evaluated by `va-codegen` as an
+                    // in-expression `ddt` (value from the integrator's own discretization, zero
+                    // at an operating point and in AC; slope through the charge channel, `jω` in
+                    // AC). Until 2.56.0 charge terms were dropped here and the probe was exact
+                    // only at an operating point (see `docs/roadmap.md`, "Displacement current
+                    // in the current probes").
+                    let mut v = *value;
                     for &g in guards.iter().rev() {
-                        // A guard is kept whole or not at all — there is no "resistive half" of
-                        // a condition — so a condition that reaches a `ddt` would smuggle the
-                        // charge back into the probe the term filter just cleaned. Refuse, and
-                        // say which construct and which variable, rather than emit an expression
-                        // whose eventual rejection names a variable index nobody wrote.
-                        if self.contains_ddt(g, tainted) {
-                            return Err(elab(self.ddt_guard_message(port, g, tainted)));
-                        }
                         let zero = self.out.push_expr(Expr::Const(0.0));
                         v = self.out.push_expr(Expr::Select(g, v, zero));
                     }
@@ -4146,31 +3932,17 @@ impl Elaborator<'_> {
                 }
                 va_ir::Stmt::Contribute { .. } | va_ir::Stmt::Assign { .. } => {}
                 va_ir::Stmt::Block(body) => {
-                    self.collect_port_flow_contributions(node, port, body, guards, tainted, out)?;
+                    self.collect_port_flow_contributions(node, body, guards, out)?;
                 }
                 va_ir::Stmt::If { cond, then_, else_ } => {
                     let mut then_guards = guards.to_vec();
                     then_guards.push(*cond);
-                    self.collect_port_flow_contributions(
-                        node,
-                        port,
-                        then_,
-                        &then_guards,
-                        tainted,
-                        out,
-                    )?;
+                    self.collect_port_flow_contributions(node, then_, &then_guards, out)?;
 
                     let not_cond = self.out.push_expr(Expr::Unary(va_ir::UnOp::Not, *cond));
                     let mut else_guards = guards.to_vec();
                     else_guards.push(not_cond);
-                    self.collect_port_flow_contributions(
-                        node,
-                        port,
-                        else_,
-                        &else_guards,
-                        tainted,
-                        out,
-                    )?;
+                    self.collect_port_flow_contributions(node, else_, &else_guards, out)?;
                 }
                 va_ir::Stmt::Case { arms, default, .. } => {
                     let hit = arms.iter().any(|a| self.branch_flow_touches(node, &a.body))
@@ -5403,46 +5175,6 @@ fn walk_stmts(stmts: &[Stmt], f: &mut impl FnMut(&Stmt)) {
             | Stmt::Contribute { .. }
             | Stmt::Task { .. }
             | Stmt::VarDecl { .. } => {}
-        }
-    }
-}
-
-/// Collect every `(VarId.0, rhs)` pair assigned anywhere in an *already-lowered* IR statement
-/// list, recursing through every nested construct (including a `for` header's `init`/`step`).
-/// The IR-side counterpart of [`collect_assign_targets`], which does the same job on the surface
-/// AST; this one feeds [`Elaborator::ddt_tainted_vars`]'s fixed point.
-///
-/// Control flow is flattened away deliberately: an assignment inside an `if`/`case`/loop is
-/// collected exactly like a top-level one, which is what makes the taint set a non-path-sensitive
-/// over-approximation (see [`Elaborator::ddt_tainted_vars`] for why that is the safe direction).
-fn collect_var_assigns(stmts: &[va_ir::Stmt], out: &mut Vec<(u32, ExprId)>) {
-    for stmt in stmts {
-        match stmt {
-            va_ir::Stmt::Assign { lhs, rhs } => out.push((lhs.0, *rhs)),
-            va_ir::Stmt::Block(body) => collect_var_assigns(body, out),
-            va_ir::Stmt::If { then_, else_, .. } => {
-                collect_var_assigns(then_, out);
-                collect_var_assigns(else_, out);
-            }
-            va_ir::Stmt::While { body, .. } | va_ir::Stmt::Repeat { body, .. } => {
-                collect_var_assigns(body, out)
-            }
-            va_ir::Stmt::For {
-                init, step, body, ..
-            } => {
-                collect_var_assigns(std::slice::from_ref(&**init), out);
-                collect_var_assigns(std::slice::from_ref(&**step), out);
-                collect_var_assigns(body, out);
-            }
-            va_ir::Stmt::Case { arms, default, .. } => {
-                for arm in arms {
-                    collect_var_assigns(&arm.body, out);
-                }
-                collect_var_assigns(default, out);
-            }
-            va_ir::Stmt::Contribute { .. }
-            | va_ir::Stmt::BoundStep(_)
-            | va_ir::Stmt::Task { .. } => {}
         }
     }
 }
@@ -8405,48 +8137,57 @@ mod tests {
     }
 
     #[test]
-    fn port_probe_excludes_charge_terms_and_keeps_the_resistive_half_of_the_same_branch() {
-        // `hicumL0_v2p0p0.va`'s real shape: the probed node carries both conduction current and
-        // charge on the same branch. Inlining the raw RHS used to manufacture a `ddt` nested in
-        // an ordinary assignment (`IB = I(<b>);`) — a shape none of those models actually wrote
-        // — and `va-codegen` refused it, blaming a nested `ddt` that appears nowhere in their
-        // source. The probe now reports conduction current only (§ `resistive_terms_only`).
+    fn port_probe_keeps_the_charge_term_beside_the_resistive_one() {
+        // `hicumL0_v2p0p0.va`'s shape: the probed node carries conduction current and charge on
+        // the same branch. The probe is the total current (2.56.0), so both halves must reach
+        // it. Until 2.56.0 the `ddt` term was dropped and the probe was exact only at an
+        // operating point.
         let m = elaborate_src(
-            "module dev(a, c); inout a, c; electrical a, c;              parameter real is = 1e-14;              parameter real cj = 1e-12;              analog begin                I(a, c) <+ is * V(a, c) + ddt(cj * V(a, c));                I(a) <+ I(<a>);              end endmodule",
+            "module dev(a, c); inout a, c; electrical a, c; \
+             parameter real is = 1e-14; \
+             parameter real cj = 1e-12; \
+             analog begin \
+               I(a, c) <+ is * V(a, c) + ddt(cj * V(a, c)); \
+               I(a) <+ I(<a>); \
+             end endmodule",
         );
         let value = match &m.analog[1] {
             va_ir::Stmt::Contribute { value, .. } => *value,
             other => panic!("expected a contribution, got {other:?}"),
         };
         assert!(
-            !expr_contains_ddt(&m, value),
-            "the probe must carry no `ddt`; got {:?}",
+            expr_contains_ddt(&m, value),
+            "the probe must carry the displacement current; got {:?}",
             m.expr(value)
         );
-        // The resistive half must survive: a probe that folded to a bare `0.0` would satisfy
-        // the assertion above for entirely the wrong reason.
+        // And the conduction half: a probe that kept only the `ddt` would pass the assertion
+        // above for the wrong reason.
         assert!(
-            matches!(m.expr(value), va_ir::Expr::Binary(va_ir::BinOp::Mul, _, _)),
-            "expected the surviving `is * V(a,c)` term, got {:?}",
+            matches!(m.expr(value), va_ir::Expr::Binary(va_ir::BinOp::Add, _, _)),
+            "expected `is * V(a,c) + ddt(...)`, got {:?}",
             m.expr(value)
         );
     }
 
     #[test]
-    fn port_probe_of_a_purely_capacitive_branch_folds_to_zero() {
-        // The boundary of the rule above: if *every* term of every touching contribution is a
-        // charge term, the port carries no conduction current and the probe is zero — not an
-        // error, and not a stray `ddt`.
+    fn port_probe_of_a_purely_capacitive_branch_is_its_charge_current() {
+        // Until 2.56.0 this folded to `0.0`: a capacitor's port carried no current at all, in
+        // transient and AC alike.
         let m = elaborate_src(
-            "module cap(a, c); inout a, c; electrical a, c;              parameter real cj = 1e-12;              analog begin                I(a, c) <+ ddt(cj * V(a, c));                I(a) <+ I(<a>);              end endmodule",
+            "module cap(a, c); inout a, c; electrical a, c; \
+             parameter real cj = 1e-12; \
+             analog begin \
+               I(a, c) <+ ddt(cj * V(a, c)); \
+               I(a) <+ I(<a>); \
+             end endmodule",
         );
         let value = match &m.analog[1] {
             va_ir::Stmt::Contribute { value, .. } => *value,
             other => panic!("expected a contribution, got {other:?}"),
         };
         assert!(
-            matches!(m.expr(value), va_ir::Expr::Const(c) if *c == 0.0),
-            "expected a folded 0.0, got {:?}",
+            matches!(m.expr(value), va_ir::Expr::Call(va_ir::Builtin::Ddt, _)),
+            "expected the `ddt(cj*V(a,c))` itself, got {:?}",
             m.expr(value)
         );
     }
@@ -8458,107 +8199,32 @@ mod tests {
             .unwrap_or_else(|| panic!("no assignment to `{var}` in the elaborated block"))
     }
 
-    /// Whether `expr`'s tree reads any local variable. Used to prove a dropped charge term is
-    /// gone *entirely* — not merely stripped of its `ddt` while still reading the variable that
-    /// carried it.
-    fn expr_contains_var(m: &Module, expr: va_ir::ExprId) -> bool {
+    /// Whether `expr`'s tree reads local variable `var`.
+    fn expr_reads_var(m: &Module, expr: va_ir::ExprId, var: VarId) -> bool {
         match m.expr(expr) {
-            va_ir::Expr::Var(_) => true,
+            va_ir::Expr::Var(v) => *v == var,
             va_ir::Expr::Call(_, args) | va_ir::Expr::CallUser(_, args) => {
-                args.iter().any(|&a| expr_contains_var(m, a))
+                args.iter().any(|&a| expr_reads_var(m, a, var))
             }
-            va_ir::Expr::Unary(_, e) | va_ir::Expr::Ddx(e, _) => expr_contains_var(m, *e),
-            va_ir::Expr::Binary(_, l, r) => expr_contains_var(m, *l) || expr_contains_var(m, *r),
+            va_ir::Expr::Unary(_, e) | va_ir::Expr::Ddx(e, _) => expr_reads_var(m, *e, var),
+            va_ir::Expr::Binary(_, l, r) => {
+                expr_reads_var(m, *l, var) || expr_reads_var(m, *r, var)
+            }
             va_ir::Expr::Select(c, t, f) => {
-                expr_contains_var(m, *c) || expr_contains_var(m, *t) || expr_contains_var(m, *f)
+                expr_reads_var(m, *c, var)
+                    || expr_reads_var(m, *t, var)
+                    || expr_reads_var(m, *f, var)
             }
             _ => false,
         }
     }
 
     #[test]
-    fn port_probe_excludes_a_charge_term_that_reached_the_branch_through_a_variable() {
-        // The same physics as `port_probe_excludes_charge_terms_...` above, spelled with the
-        // `ddt` bound to a variable first. A purely syntactic scan of the `<+` right-hand side
-        // sees only `is*V(a,c) + qd` and calls it entirely resistive, so the charge survived
-        // into the probe — the two spellings of one device disagreed, and the one that carried
-        // the charge was then rejected downstream by index (`variable #0 read before
-        // assignment`) rather than by name. The variable arm of `Elaborator::contains_ddt`
-        // (§ `Elaborator::ddt_tainted_vars`) is what closes that gap.
-        let m = elaborate_src(
-            "module dev(a, c); inout a, c; electrical a, c; \
-             parameter real is = 1e-14; \
-             parameter real cj = 1e-12; \
-             real qd, ib; \
-             analog begin \
-               qd = ddt(cj * V(a, c)); \
-               I(a, c) <+ is * V(a, c) + qd; \
-               ib = I(<a>); \
-               I(a) <+ ib; \
-             end endmodule",
-        );
-        let value = probe_read(&m, "ib");
-        assert!(
-            !expr_contains_ddt(&m, value),
-            "the probe must carry no `ddt`; got {:?}",
-            m.expr(value)
-        );
-        // Stronger than "no `ddt`": the `qd` read itself must be gone. A probe that kept
-        // `Var(qd)` while the scan merely failed to look inside it would satisfy the assertion
-        // above and still be exactly the bug.
-        assert!(
-            !expr_contains_var(&m, value),
-            "the probe must not read the charge variable at all; got {:?}",
-            m.expr(value)
-        );
-        // And the resistive half must survive — a fold to a bare `0.0` would pass both
-        // assertions above for entirely the wrong reason.
-        assert!(
-            matches!(m.expr(value), va_ir::Expr::Binary(va_ir::BinOp::Mul, _, _)),
-            "expected the surviving `is * V(a,c)` term, got {:?}",
-            m.expr(value)
-        );
-    }
-
-    #[test]
-    fn port_probe_taint_follows_a_chain_of_assignments_to_a_fixed_point() {
-        // One assignment of depth is not enough: `qd` carries the `ddt`, `qs` carries `qd`, and
-        // it is `qs` that reaches the branch. Only the fixed point in
-        // `Elaborator::ddt_tainted_vars` sees the second link.
-        let m = elaborate_src(
-            "module dev(a, c); inout a, c; electrical a, c; \
-             parameter real is = 1e-14; \
-             parameter real cj = 1e-12; \
-             real qd, qs, ib; \
-             analog begin \
-               qd = ddt(cj * V(a, c)); \
-               qs = 2.0 * qd; \
-               I(a, c) <+ is * V(a, c) + qs; \
-               ib = I(<a>); \
-               I(a) <+ ib; \
-             end endmodule",
-        );
-        let value = probe_read(&m, "ib");
-        assert!(
-            !expr_contains_ddt(&m, value) && !expr_contains_var(&m, value),
-            "the probe must carry neither the `ddt` nor the variable chain that reached it; \
-             got {:?}",
-            m.expr(value)
-        );
-        assert!(
-            matches!(m.expr(value), va_ir::Expr::Binary(va_ir::BinOp::Mul, _, _)),
-            "expected the surviving `is * V(a,c)` term, got {:?}",
-            m.expr(value)
-        );
-    }
-
-    #[test]
-    fn port_probe_keeps_a_variable_term_that_never_sees_a_ddt() {
-        // The negative control for the taint analysis: the two terms of this contribution are
-        // both bare variable reads, and only one of them was ever assigned a `ddt`. Dropping
-        // both would make `I(<port>)` useless for every model that names its conduction current
-        // before contributing it — the over-approximation must be over `ddt` reachability, not
-        // over "is a variable".
+    fn port_probe_keeps_a_charge_term_that_reached_the_branch_through_a_variable() {
+        // The same physics as `port_probe_keeps_the_charge_term_beside_the_resistive_one`,
+        // spelled with the `ddt` bound to a variable first. Both spellings must report the same
+        // current, so the probe must read `qd` (whose value `va-codegen` computes as an
+        // in-expression `ddt`) as well as `gm`.
         let m = elaborate_src(
             "module dev(a, c); inout a, c; electrical a, c; \
              parameter real is = 1e-14; \
@@ -8573,52 +8239,21 @@ mod tests {
              end endmodule",
         );
         let value = probe_read(&m, "ib");
-        // The probe is exactly the surviving `gm` read — resolved to the `VarId` `gm` itself
-        // names, so this pins *which* variable survived, not merely that one did.
-        let gm = var_id(&m, "gm");
-        assert!(
-            matches!(m.expr(value), va_ir::Expr::Var(v) if *v == gm),
-            "expected the probe to be the untainted `gm` read, got {:?}",
-            m.expr(value)
-        );
+        for name in ["gm", "qd"] {
+            assert!(
+                expr_reads_var(&m, value, var_id(&m, name)),
+                "the probe must read `{name}`; got {:?}",
+                m.expr(value)
+            );
+        }
     }
 
     #[test]
-    fn port_probe_taint_is_not_path_sensitive_and_a_reassigned_variable_stays_tainted() {
-        // Locks in the documented over-approximation (§ `Elaborator::ddt_tainted_vars`): `qd` is
-        // plainly `0.0` by the time the contribution reads it, but taint is a property of the
-        // variable across the whole block, not of a program point, so the term is still dropped.
-        // Deliberate: over-approximating loses a conduction term the probe already documents
-        // itself as approximating, whereas under-approximating smuggles a charge into a probe
-        // documented to report conduction current only.
+    fn port_probe_keeps_a_guard_that_depends_on_a_ddt() {
+        // Until 2.56.0 this was refused (E0374, now retired): with charge dropped from values, a
+        // guard reaching a `ddt` could not be kept. The probe keeps everything now, so the
+        // contribution counts exactly when its condition holds, like any other guarded one.
         let m = elaborate_src(
-            "module dev(a, c); inout a, c; electrical a, c; \
-             parameter real is = 1e-14; \
-             parameter real cj = 1e-12; \
-             real qd, ib; \
-             analog begin \
-               qd = ddt(cj * V(a, c)); \
-               qd = 0.0; \
-               I(a, c) <+ is * V(a, c) + qd; \
-               ib = I(<a>); \
-               I(a) <+ ib; \
-             end endmodule",
-        );
-        let value = probe_read(&m, "ib");
-        assert!(
-            matches!(m.expr(value), va_ir::Expr::Binary(va_ir::BinOp::Mul, _, _)),
-            "expected only the `is * V(a,c)` term to survive, got {:?}",
-            m.expr(value)
-        );
-    }
-
-    #[test]
-    fn port_probe_refuses_a_guard_that_depends_on_a_ddt_by_name() {
-        // A condition cannot be half-kept the way a sum can, so a guard that reaches a `ddt` is
-        // refused rather than folded. The point of the test is the *wording*: the old failure
-        // for this shape came out of `va-codegen` as `variable #0 read before assignment`,
-        // which names neither the construct nor the cause.
-        let err = elaborate_err(
             "module dev(a, c); inout a, c; electrical a, c; \
              parameter real is = 1e-14; \
              parameter real cj = 1e-12; \
@@ -8630,18 +8265,19 @@ mod tests {
                I(a) <+ ib; \
              end endmodule",
         );
-        assert!(
-            err.contains("`I(<a>)`") && err.contains("`qd`") && err.contains("ddt"),
-            "the refusal must name the construct, the variable, and the cause; got: {err}"
-        );
-        assert!(
-            !err.contains("read before assignment"),
-            "the refusal must not fall through to the by-index codegen message; got: {err}"
-        );
+        let value = probe_read(&m, "ib");
+        match m.expr(value) {
+            va_ir::Expr::Select(cond, _, _) => assert!(
+                expr_reads_var(&m, *cond, var_id(&m, "qd")),
+                "the guard must be the `qd > 0.0` condition; got {:?}",
+                m.expr(*cond)
+            ),
+            other => panic!("expected the guarded contribution as a select, got {other:?}"),
+        }
     }
 
     /// Whether `expr`'s tree contains a `ddt` call — the test-side mirror of
-    /// [`Elaborator::contains_ddt`], which works on the elaborator's in-progress module.
+    /// the scan the elaborator used until 2.56.0.
     fn expr_contains_ddt(m: &Module, expr: va_ir::ExprId) -> bool {
         match m.expr(expr) {
             va_ir::Expr::Call(va_ir::Builtin::Ddt, _) => true,

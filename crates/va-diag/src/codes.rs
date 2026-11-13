@@ -465,7 +465,7 @@ pub const E0372: Code = Code::new("E0372");
 /// `{port}` is a {dims}-D vector port; port-current probes are only supported for a scalar port (v1 limitation)
 pub const E0373: Code = Code::new("E0373");
 
-/// `I(<{port}>)` can't sum a flow contribution whose enclosing `if` condition depends on `ddt` ({via})
+/// `I(<{port}>)` can't sum a flow contribution whose enclosing `if` condition depends on `ddt` ({via}). No longer raised since 2.56.0, whose probe keeps charge terms
 pub const E0374: Code = Code::new("E0374");
 
 /// a port-current probe (§ port-current probe) can't sum a flow contribution made inside a {construct} — not yet supported
@@ -912,6 +912,9 @@ pub const R0410: Code = Code::new("R0410");
 /// `idt` with a reset (`assert`) argument other than 0
 pub const R0411: Code = Code::new("R0411");
 
+/// `{name}` holds a `ddt` assigned inside an if/case/loop arm whose condition is not constant for the whole run, and is read as a value (LRM 4.5.15)
+pub const R0412: Code = Code::new("R0412");
+
 /// `timescale has no effect in Verilog-A
 pub const W0101: Code = Code::new("W0101");
 
@@ -1008,7 +1011,7 @@ pub const ALL: &[Code] = &[
     E0723, E0724, E0725, E0726, E0727, E0728, E0729, E0730, E0731, E0732, E0733, E0734, E0735,
     E0736, E0737, E0738, E0739, E073A, E073B, R0101, R0201, R0202, R0203, R0204, R0301, R0302,
     R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405,
-    R0406, R0407, R0408, R0409, R0410, R0411, W0101, W0102, W0103, W0104, W0301, W0302, W0401,
-    W0402, W0403, W0501, W0502, W0503, W0504, W0505, W0506, W0507, W0508, W0509, W050A, W050B,
-    W050C, W0601, W0602, W0701,
+    R0406, R0407, R0408, R0409, R0410, R0411, R0412, W0101, W0102, W0103, W0104, W0301, W0302,
+    W0401, W0402, W0403, W0501, W0502, W0503, W0504, W0505, W0506, W0507, W0508, W0509, W050A,
+    W050B, W050C, W0601, W0602, W0701,
 ];

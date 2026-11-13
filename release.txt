@@ -22,6 +22,41 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.56.0 - 2026-11-13
+-------------------
+**`I(<port>)` and the branch self-probe `I(br)` report the total current, displacement included**
+(roadmap "After 2.0" item 8). va-frontend, va-codegen, va-diag, messages/.
+  * Until now both probes reported conduction current only: every `ddt` term was dropped, so in
+    transient and AC a capacitive port's probed current was wrong by the whole displacement
+    current, with no warning (exact only at an operating point). Found by the Spectre runs.
+  * `I(<port>)`: the frontend fold keeps each contribution whole; codegen evaluates the `ddt` it
+    meets as an in-expression `ddt` (integrator-consistent value, zero at an operating point and
+    in AC; slope through the charge channel, `jω` in AC). `I(br)`: the accumulator row carries the
+    branch's charge as `-Q` on its charge channel, so it reads `y = R + dQ/dt`. No Interface β
+    change. E0374 (a `ddt`-dependent guard on a probed contribution) is retired: such a guard is
+    now kept like any other. Dead code removed with it (the charge filter and its `ddt` taint scan).
+  * Found on the way and fixed: a variable holding a `ddt` could only be substituted into a `<+`.
+    Read as a value (`q = ddt(x); w = 2*q;`) it failed with E0413 — or, where the variable had an
+    ordinary assignment too or the `ddt` sat under a solution-dependent `if`, **silently read 0 or
+    a stale value**. Now the assignment is also evaluated when its guards are time-invariant, and
+    refused as the new R0412 when they are not. The probe needed this (`I(<a>)` over
+    `I <+ is*V + qd;` reads `qd`).
+  * Gates: against Spectre (`compare_zoo.py`, golden/spectre/zoo) portprobe_ramp 2.9e-5,
+    portprobe_sq 5.9e-5, portprobe_ac 5.4e-5, selfprobe_ramp 2.9e-5, nlcap_ramp 8.5e-5 of the
+    swing (were 0.30-1.0), portprobe_dc 0 (unchanged). New tests: closed forms through va-cli in
+    transient, AC (Y = 1/r + jwC, 10 Hz-10 MHz) and DC for both probes, the product rule, the
+    through-a-variable spelling, the formerly refused guard, `ddt` read as a value, and R0412;
+    a codegen test of the accumulator row's charge and its assembled Jacobian against central
+    differences (fails with the charge stamp disabled).
+  * Measured at this version: cargo test --workspace 1063 passed, 0 failed; fmt and clippy clean;
+    `cargo xtask validate` 33/33, convergence 33/33, its output byte-identical to 2.55.0+6's
+    (every error figure, run side by side from a worktree of HEAD); corpus `check external --codegen` 219/250
+    and `check models --codegen` 69/69, the same files failing with the same messages as 2.55.0+6.
+  * Cost: a model whose `I(<port>)` reads a `ddt` now evaluates it in an expression, which turns
+    off device bypass and the static schedule for that model (as any in-expression `ddt` does).
+    Limits unchanged: a probed contribution inside a `case` arm or a loop, and vector ports.
+
+
 2.55.0+6 - 2026-11-13
 ---------------------
 **Raw Spectre output is kept local; a time and memory comparison is kept local** (docs and

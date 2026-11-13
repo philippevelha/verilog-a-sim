@@ -830,6 +830,7 @@ impl GeneratedModel {
             idt_slots: &self.shared.slot_maps.idt,
             mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
+            flow_charge_totals: RefCell::new(HashMap::new()),
             sched: None,
             validating,
         }
@@ -1358,7 +1359,14 @@ impl GeneratedModel {
                     }
                 }
 
-                if let Some(q) = FastSum::charge(ctx, &c.charge) {
+                // As for the resistive sum: a self-probed branch wants the `Dual`, for its
+                // accumulator's charge channel (2.56.0), so it skips the register fast path.
+                let fast_q = if self.is_self_probed_flow_branch(c.branch.0) {
+                    None
+                } else {
+                    FastSum::charge(ctx, &c.charge)
+                };
+                if let Some(q) = fast_q {
                     let Ok(q) = q else {
                         return;
                     };
@@ -1373,6 +1381,11 @@ impl GeneratedModel {
                     let Ok(q) = Self::sum_charge_terms(ctx, &c.charge) else {
                         return;
                     };
+                    // `I(br)` reports the total current: the branch's charge goes to its
+                    // accumulator row too (`Self::stamp_flow_current_accumulators`).
+                    if self.is_self_probed_flow_branch(c.branch.0) {
+                        ctx.add_flow_charge(c.branch.0, &q);
+                    }
                     // A charge argument that itself carries charge is a second time derivative,
                     // which this sink's single charge channel cannot express. `Dual::into_ddt`
                     // catches the nested-expression spelling; this catches the one that reaches
@@ -2538,7 +2551,9 @@ impl GeneratedModel {
     }
 
     /// Pin every self-probed flow branch's own accumulator unknown to the branch's total
-    /// resistive contribution this call (`residual = unknown - total`, `jacobian(self,self) =
+    /// contributed current this call: its resistive total on the residual, and (since 2.56.0)
+    /// its charge total, negated, on the charge channel, so the row reads `y = R + dQ/dt`
+    /// (`residual = unknown - total`, `jacobian(self,self) =
     /// 1 - d(total)/d(self)` — the last term only nonzero for `diode_basic.va`'s genuinely
     /// self-referential case, where the branch's own current feeds into its own defining
     /// contribution; Newton resolves the fixed point exactly like any other implicit equation).
@@ -2573,6 +2588,19 @@ impl GeneratedModel {
             for (slot, dg) in total.grad_ddt() {
                 let gk = self.terminals[slot];
                 sink.dcharge(g, gk, -dg);
+            }
+            // The branch's top-level charge terms (2.56.0): `-Q` on this row's charge channel
+            // makes its equation `y - R - dQ/dt = 0` once the consumer supplies `d/dt` (the
+            // integrator's companion in transient, `jω` in AC, nothing at an operating point,
+            // where `dQ/dt = 0`). So `I(br)` is the total current, displacement included, by
+            // the same mechanism that puts the charge on the branch's node rows.
+            crate::counters::ctx_map_lookup();
+            if let Some(q) = ctx.flow_charge_totals.borrow().get(&acc.branch.0) {
+                sink.charge(g, -q.value);
+                for (slot, dg) in q.grad() {
+                    let gk = self.terminals[slot];
+                    sink.dcharge(g, gk, -dg);
+                }
             }
         }
     }
@@ -5279,6 +5307,131 @@ mod tests {
         // stamp, exactly as if it were never self-probed at all.
         assert!((sink.residual[0] - total).abs() < 1e-9);
         assert!((sink.residual[1] - -total).abs() < 1e-9);
+    }
+
+    /// The self-probe reports the total current (2.56.0): a branch carrying `V/R` and a
+    /// nonlinear charge `ddt(cj*V*V)` has its accumulator row read `y = V/R + dQ/dt`. The charge
+    /// goes on that row's charge channel as `-Q`, with `-∂Q/∂x`, and the whole system's
+    /// assembled transient Jacobian (`jacobian + coeff·dcharge`) matches a central difference
+    /// (`CLAUDE.md` §5). Until 2.56.0 the row carried no charge and `I(br)` was the conduction
+    /// current only.
+    #[test]
+    fn self_probed_flow_branch_carries_its_charge_on_the_accumulator_row() {
+        let mut m = Module::new("self_probed_charge");
+        for name in ["p", "n", "out", "gnd"] {
+            m.nodes.push(NodeDecl {
+                name: name.into(),
+                discipline: Discipline::Electrical,
+                abstol: None,
+                access: None,
+                units: None,
+            });
+        }
+        m.ports = vec![
+            vec![NodeId(0)],
+            vec![NodeId(1)],
+            vec![NodeId(2)],
+            vec![NodeId(3)],
+        ];
+        m.branches = vec![
+            Branch {
+                p: NodeId(0),
+                n: NodeId(1),
+            },
+            Branch {
+                p: NodeId(2),
+                n: NodeId(3),
+            },
+        ];
+        let (r_val, cj) = (1000.0, 2e-9);
+        m.params = vec![
+            Param {
+                name: "R".into(),
+                default: r_val,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "cj".into(),
+                default: cj,
+                min: Some(0.0),
+                max: None,
+            },
+        ];
+        let probe_v = |m: &mut Module| {
+            m.push_expr(Expr::Probe(Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            }))
+        };
+        let vpn = probe_v(&mut m);
+        let r = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let ipn = m.push_expr(Expr::Binary(va_ir::BinOp::Div, vpn, r));
+        let (v1, v2) = (probe_v(&mut m), probe_v(&mut m));
+        let c = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let vv = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, v1, v2));
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c, vv));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let ipn_probe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Flow,
+            branch: BranchId(0),
+        }));
+        let flow = |b| Access {
+            kind: AccessKind::Flow,
+            branch: BranchId(b),
+        };
+        m.analog = vec![
+            Stmt::Contribute {
+                target: flow(0),
+                value: ipn,
+            },
+            Stmt::Contribute {
+                target: flow(0),
+                value: ddt_q,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Potential,
+                    branch: BranchId(1),
+                },
+                value: ipn_probe,
+            },
+        ];
+
+        let mut next = 4;
+        let inst = build_instance(&m, &[0, 1, 2, 3], &mut next).unwrap();
+        assert_eq!(
+            next, 6,
+            "branch 1's current -> 4, branch 0's accumulator -> 5"
+        );
+
+        // The accumulator row's charge channel: -Q and -dQ/dx, Q = cj*(vp-vn)^2.
+        let (vp, vn) = (0.6, 0.1);
+        let v = vp - vn;
+        let mut sink = DenseStamp::new(6);
+        inst.load(
+            &[vp, vn, 0.0, 0.0, 0.0, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
+        assert!(
+            (sink.charge[5] - -(cj * v * v)).abs() < 1e-18,
+            "{}",
+            sink.charge[5]
+        );
+        assert!((sink.dcharge[5 * 6] - -(2.0 * cj * v)).abs() < 1e-15);
+        assert!((sink.dcharge[5 * 6 + 1] - (2.0 * cj * v)).abs() < 1e-15);
+        // ... and the node rows still carry the same charge, unchanged.
+        assert!((sink.charge[0] - cj * v * v).abs() < 1e-18);
+
+        // The assembled transient system, every row and column, against central differences.
+        assert_assembled_jacobian_matches_fd(
+            inst.as_ref(),
+            6,
+            &[vp, vn, 0.3, 0.0, 1e-3, 4e-4],
+            1e6,
+        );
     }
 
     /// `verilogaLib-master/ohmmeter.va`'s real shape: `V(dutm,iprobe) <+ 0;` (an ideal-ammeter

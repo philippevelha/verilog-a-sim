@@ -1,10 +1,9 @@
 {
   "code": "E0374",
-  "rev": 1,
+  "rev": 2,
   "message": "`I(<{port}>)` can't sum a flow contribution whose enclosing `if` condition depends on `ddt` ({via})",
-  "description": "The probe reports conduction current only, so a charge term is dropped from a contribution's value. But a condition is kept whole or not at all, so keeping this one would carry the `ddt` into the ordinary assignment that reads the probe, which no model wrote and the code generator refuses.",
+  "description": "Retired in 2.56.0, in which `I(<port>)` reports the total current through the port, displacement current included, so a condition that depends on `ddt` is kept like any other and this error is no longer raised. Codes are never reused. Until 2.55.x the probe reported conduction current only and dropped a contribution's charge terms; a condition cannot be partly dropped, so one that depended on `ddt` was refused with this code.",
   "actions": [
-    "Compute the condition from a `ddt`-free expression.",
-    "Or read the branch current directly instead of probing the port."
+    "Nothing to do on 2.56.0 or later. On 2.55.x or earlier, compute the condition from a `ddt`-free expression, or read the branch current directly instead of probing the port."
   ]
 }

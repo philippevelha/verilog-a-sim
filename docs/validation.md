@@ -223,9 +223,12 @@ file exists to prevent.
 `golden/qspice/README.md` (including a deliberate negative control, `portprobe_dc`, which must
 show *no* displacement current at DC). Their numbers discriminate — the margins in that README
 run from 50% to 10^6 — but the decks were run by hand rather than through
-`translate_for_qspice`, so nothing re-runs them today. **Deliberately kept for future gating,** 
-not dead weight to delete: gating them is the remaining step, and until then they are honestly
-zero coverage rather than coverage-in-waiting.
+`translate_for_qspice`, so `cargo xtask validate` does not re-run them. **Since 2.56.0 they are
+covered two other ways:** against Spectre's outputs in `golden/spectre/zoo/` by
+`scripts/spectre_golden/compare_zoo.py` (all six within 9e-5 of the swing; until 2.55.x five of
+them failed by 30–100 %, the displacement current the probes dropped), and against closed forms
+by `crates/va-cli/tests/port_current_probe.rs`, which `cargo test` runs. Wiring the QSPICE
+references into `xtask validate` is still the remaining step.
 
 **A unit-test fixture (1).** `hier_divider` — driven by a `va-cli` test, never intended for a
 golden comparison.

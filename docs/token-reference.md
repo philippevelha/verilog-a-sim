@@ -2528,6 +2528,18 @@ declared port `a`, not a branch between two nets.
   (`if (rbi >= `MIN_R) I(br_rbi) <+ ...;` before an operating-point block's `IB = I(<b>);`).
   Every term is summed into one `Expr::Binary(Add, ...)` chain; no qualifying contribution at
   all folds to `Expr::Const(0.0)` (an untouched port genuinely has zero current, not an error).
+  **Charge terms are summed too** (2.56.0): the probe is the *total* current through the port,
+  conduction plus displacement. A `ddt` that reaches it is evaluated by `va-codegen` as an
+  in-expression `ddt` — its value from the integrator's own discretization (zero at an operating
+  point and in AC), its slope through the charge channel (`jω` in AC) — so the probe is exact at an
+  operating point, consistent with the integrator in transient, and the admittance `G + jωC` in
+  AC. A guard that depends on `ddt` is kept like any other. From 2026-08-29 to 2.55.x the fold
+  dropped every charge term (conduction current only, wrong in transient and AC by the whole
+  displacement current, with no warning) and refused a `ddt`-dependent guard (E0374, retired).
+  The branch self-probe `I(br)` (§2.17) follows the same rule: its accumulator row carries the
+  branch's charge. Verified against Spectre (`golden/spectre/zoo/`: `portprobe_ramp`, `_sq`,
+  `_ac`, `selfprobe_ramp`, `nlcap_ramp` within 9e-5 of the swing) and closed forms
+  (`crates/va-cli/tests/port_current_probe.rs`).
   **Limitation**: a qualifying contribution found inside a `case`/`for`/`while`/`repeat` is
   rejected with a clear "not yet supported" error (`Elaborator::branch_flow_touches` detects
   the case) rather than silently mis-summed or silently dropped — those need either a per-arm

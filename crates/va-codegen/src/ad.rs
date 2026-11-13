@@ -877,6 +877,11 @@ pub struct Ctx<'a> {
     /// populates it; `crate::GeneratedModel::stamp_flow_current_accumulators` consumes it after
     /// the statement walk finishes). See `crate::lower::FlowCurrentAccumulator`'s doc comment.
     pub flow_current_totals: RefCell<HashMap<u32, Dual>>,
+    /// The charge-channel twin of [`Self::flow_current_totals`]: per self-probed branch, the sum
+    /// of its contributions' charge terms `Q` (value and `∂Q/∂x`), so the branch's accumulator
+    /// row can carry `dQ/dt` and `I(br)` reports the total current, displacement included
+    /// (2.56.0). Populated and consumed by the same two functions.
+    pub flow_charge_totals: RefCell<HashMap<u32, Dual>>,
     /// Whether this `Ctx` belongs to `crate::GeneratedModel::validate`'s dry run rather than a
     /// real `crate::GeneratedModel::load` call. Consulted only when evaluating a user-defined
     /// analog function's own internal control flow (see [`call_function`]): validating visits
@@ -940,6 +945,19 @@ impl Ctx<'_> {
         let updated = match totals.get(&branch) {
             Some(existing) => existing.add(value),
             None => value.clone(),
+        };
+        totals.insert(branch, updated);
+    }
+
+    /// Add charge `q` into the running charge total for `branch` — the charge-channel twin of
+    /// [`Self::add_flow_current`] (see [`Self::flow_charge_totals`]).
+    pub fn add_flow_charge(&self, branch: u32, q: &Dual) {
+        crate::counters::ctx_map_lookup();
+        crate::counters::ctx_map_lookup();
+        let mut totals = self.flow_charge_totals.borrow_mut();
+        let updated = match totals.get(&branch) {
+            Some(existing) => existing.add(q),
+            None => q.clone(),
         };
         totals.insert(branch, updated);
     }
@@ -2530,6 +2548,7 @@ mod tests {
             idt_slots: &HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
+            flow_charge_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         let d = eval(&ctx, vt).unwrap();
@@ -2600,6 +2619,7 @@ mod tests {
             idt_slots: &HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
+            flow_charge_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         eval(&ctx, call).expect("table_model evaluates")
@@ -2757,6 +2777,7 @@ mod tests {
             idt_slots: &HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
+            flow_charge_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         let d = eval(&ctx, vt).unwrap();
@@ -2855,6 +2876,7 @@ mod tests {
             idt_slots: &HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
+            flow_charge_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
 
@@ -2950,6 +2972,7 @@ mod tests {
             idt_slots: &HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
+            flow_charge_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         let analytic = eval(&ctx, gdio).unwrap().value;
@@ -3000,6 +3023,7 @@ mod tests {
             idt_slots: &HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
+            flow_charge_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 2.0);
@@ -3037,6 +3061,7 @@ mod tests {
             idt_slots: &HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
+            flow_charge_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 3.0);

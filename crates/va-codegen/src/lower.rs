@@ -906,14 +906,12 @@ fn idt_wraps(module: &Module, accumulators: &[IdtAccumulator]) -> Vec<IdtWrap> {
 /// entry exactly like a `BranchCurrent`'s) — Newton resolves the self-referential case exactly
 /// like it resolves any other implicit equation, with no special-casing needed at read sites.
 ///
-/// **Limitation:** the defining equation only sums the branch's *resistive* contributions, not
-/// any `ddt`/charge term also contributed to it — this project's DC solve already ignores the
-/// charge channel entirely (`crate::lower`'s `ddt` handling), so this is consistent there, but a
-/// transient run's `I(...)` read of a self-probed branch that also carries a `ddt` term (e.g.
-/// `diode_basic.va`'s own `I(anode,cathode) <+ Im+(ddt(Qd));`) will not reflect that charge
-/// current's contribution. No corpus file surveyed feeds such a probe back into anything
-/// electrical, only into diagnostic output, so this was not worth the added complexity of a
-/// second, charge-aware defining equation.
+/// **Charge terms** (since 2.56.0): the defining equation carries the branch's charge too, on
+/// the accumulator row's charge channel (`-Q`), so the row reads `y = R + dQ/dt` and `I(br)` is
+/// the total current — conduction plus displacement — in transient and AC alike, and exactly the
+/// conduction current at an operating point, where `dQ/dt = 0`. Until 2.56.0 only the resistive
+/// total was summed, and a transient or AC read of a branch carrying a `ddt` term (e.g.
+/// `diode_basic.va`'s own `I(anode,cathode) <+ Im+(ddt(Qd));`) silently missed that current.
 #[derive(Clone, Copy, Debug)]
 pub struct FlowCurrentAccumulator {
     /// Which branch this accumulator shadows.
@@ -1425,7 +1423,10 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         let mut probe_stmts = Vec::new();
         let mut probe_ddt_vars = HashMap::new();
         let mut probe_dropped: HashMap<u32, bool> = HashMap::new();
-        let mut discover: Escaping = HashSet::new();
+        let mut discover = Escaping {
+            read_as_value: vars_read_as_values(module),
+            ..Escaping::default()
+        };
         for stmt in &module.analog {
             lower_stmt(
                 module,
@@ -2274,6 +2275,19 @@ fn lower_stmt(
             // read normally, not substituted.
             match charge_term_shape(module, *rhs, param_only)? {
                 Some(_) => {
+                    // Read as a value, but evaluated only on the steps a solution-dependent arm
+                    // (or a loop body) runs: its history would not advance on the others, so the
+                    // rate is wrong, and not emitting it leaves the read at the variable's
+                    // initial 0 — silently, until 2.56.0. Refused, like R0407's `<+` spelling.
+                    if !guards_invariant && escaping.read_as_value.contains(&lhs.0) {
+                        let name = module
+                            .vars
+                            .get(lhs.0 as usize)
+                            .map_or_else(|| format!("#{}", lhs.0), |v| v.name.clone());
+                        return Err(CodegenError::Unsupported(
+                            Diagnostic::new(codes::R0412).arg("name", name),
+                        ));
+                    }
                     ddt_vars.insert(lhs.0, *rhs);
                     // Keeping the binding *and* emitting is deliberate: a variable that is both
                     // folded at an in-arm `<+` and read after the arm keeps the charge channel
@@ -2282,7 +2296,7 @@ fn lower_stmt(
                     // to files that error today — an unconditional emit would start evaluating
                     // every `ddt`-shape assignment in `validate`, including dead ones, and
                     // `Dual::into_ddt` errors on an argument that already carries charge.
-                    if escaping.contains(&lhs.0) {
+                    if escaping.emits(lhs.0, guards_invariant) {
                         out.push(LoweredStmt::Assign {
                             lhs: *lhs,
                             rhs: *rhs,
@@ -2979,7 +2993,128 @@ fn ddt_arg(module: &Module, expr: ExprId) -> Result<Option<ExprId>, CodegenError
 /// which is strictly after the assignment was already lowered (or, as it used to be, elided). A
 /// forward single pass cannot know. So pass 1 discovers this set and throws its output away;
 /// pass 2 reruns with it and emits the assignment that pass 1 dropped.
-type Escaping = HashSet<u32>;
+///
+/// It also carries a second, simpler set (2.56.0): the variables **read as a value** anywhere —
+/// in an assignment, a condition, a task argument, or any position of a `<+` other than a bare
+/// additive term — which [`vars_read_as_values`] finds before either pass. Such a variable
+/// needs a real value at the read, so its `ddt`-shape assignment is emitted too (evaluated as an
+/// in-expression `ddt`) when it sits under time-invariant guards. Under a solution-dependent
+/// guard it is not, and the read stays the error it was (E0413), because the rate would go stale
+/// on the steps the arm is skipped — the reason R0407 refuses the `<+` spelling. Until 2.56.0
+/// `q = ddt(x); w = 2*q;` failed with E0413 for every placement; `I(<port>)` reading a charge
+/// carried through a variable (2.56.0) is the shape that made it matter.
+#[derive(Debug, Default)]
+struct Escaping {
+    /// Escaping a branch under time-invariant guards, found by pass 1 (the original meaning).
+    across_branch: HashSet<u32>,
+    /// Read as a value somewhere, found by [`vars_read_as_values`].
+    read_as_value: HashSet<u32>,
+}
+
+impl Escaping {
+    fn insert(&mut self, var: u32) -> bool {
+        self.across_branch.insert(var)
+    }
+
+    /// Whether `var`'s `ddt`-shape assignment, made under guards that are time-invariant or
+    /// not as `guards_invariant` says, must also be emitted as an ordinary assignment.
+    fn emits(&self, var: u32, guards_invariant: bool) -> bool {
+        self.across_branch.contains(&var) || (guards_invariant && self.read_as_value.contains(&var))
+    }
+}
+
+/// Every local variable (`VarId.0`) the analog block reads **as a value**: anywhere except as a
+/// bare additive term of a `<+` right-hand side, where [`lower_stmt`] substitutes a `ddt`-shape
+/// binding instead. See [`Escaping::read_as_value`].
+fn vars_read_as_values(module: &Module) -> HashSet<u32> {
+    fn expr_vars(module: &Module, e: ExprId, out: &mut HashSet<u32>) {
+        match module.expr(e) {
+            Expr::Var(v) => {
+                out.insert(v.0);
+            }
+            Expr::Call(_, args) | Expr::CallUser(_, args) => {
+                for &a in args {
+                    expr_vars(module, a, out);
+                }
+            }
+            Expr::Unary(_, a) | Expr::Ddx(a, _) => expr_vars(module, *a, out),
+            Expr::Binary(_, a, b) => {
+                expr_vars(module, *a, out);
+                expr_vars(module, *b, out);
+            }
+            Expr::Select(c, a, b) => {
+                expr_vars(module, *c, out);
+                expr_vars(module, *a, out);
+                expr_vars(module, *b, out);
+            }
+            _ => {}
+        }
+    }
+    fn walk(module: &Module, stmts: &[Stmt], out: &mut HashSet<u32>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Contribute { value, .. } => {
+                    let mut terms = Vec::new();
+                    collect_terms(module, *value, 1.0, &mut terms);
+                    for t in terms {
+                        if !matches!(module.expr(t.expr), Expr::Var(_)) {
+                            expr_vars(module, t.expr, out);
+                        }
+                    }
+                }
+                Stmt::Assign { rhs, .. } => expr_vars(module, *rhs, out),
+                Stmt::If { cond, then_, else_ } => {
+                    expr_vars(module, *cond, out);
+                    walk(module, then_, out);
+                    walk(module, else_, out);
+                }
+                Stmt::Block(body) => walk(module, body, out),
+                Stmt::While { cond, body } => {
+                    expr_vars(module, *cond, out);
+                    walk(module, body, out);
+                }
+                Stmt::For {
+                    init,
+                    cond,
+                    step,
+                    body,
+                } => {
+                    walk(module, std::slice::from_ref(&**init), out);
+                    expr_vars(module, *cond, out);
+                    walk(module, std::slice::from_ref(&**step), out);
+                    walk(module, body, out);
+                }
+                Stmt::Repeat { count, body } => {
+                    expr_vars(module, *count, out);
+                    walk(module, body, out);
+                }
+                Stmt::Case {
+                    selector,
+                    arms,
+                    default,
+                } => {
+                    expr_vars(module, *selector, out);
+                    for arm in arms {
+                        for &l in &arm.labels {
+                            expr_vars(module, l, out);
+                        }
+                        walk(module, &arm.body, out);
+                    }
+                    walk(module, default, out);
+                }
+                Stmt::BoundStep(e) => expr_vars(module, *e, out),
+                Stmt::Task { args, .. } => {
+                    for e in args.iter().filter_map(va_ir::TaskArg::expr) {
+                        expr_vars(module, e, out);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    walk(module, &module.analog, &mut out);
+    out
+}
 
 /// Whether `expr` is **constant for the whole run** — not merely parameter-*valued*.
 ///

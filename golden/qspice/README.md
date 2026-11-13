@@ -4,6 +4,11 @@ Hand-written QSPICE decks for the `I(<port>)` / `I(branch)` displacement-current
 describes the *same physics* as a `models/*.va` + `circuits/*.net` pair, built from QSPICE-native
 primitives so the comparison is evidence rather than a restatement of our own lowering.
 
+**Since 2.56.0 the probes include the displacement current** that these decks measure: checked
+against Spectre's runs of the `circuits/*.net` decks (`golden/spectre/zoo/`) and against closed
+forms (`crates/va-cli/tests/port_current_probe.rs`). Not re-run against these QSPICE files, whose
+PWL sources differ from the decks' SIN.
+
 **Status: verified to run and to discriminate; not yet wired into `xtask gen-golden`.
 Parked deliberately (confirmed 2026-09-01), to be gated later — not abandoned.** The six
 `circuits/*.net` decks these mirror are therefore exercised by nothing today: they are

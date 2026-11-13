@@ -1,0 +1,10 @@
+{
+  "code": "R0412",
+  "rev": 1,
+  "message": "`{name}` holds a `ddt` assigned inside an if/case/loop arm whose condition is not constant for the whole run, and is read as a value (LRM 4.5.15)",
+  "description": "The `ddt` is evaluated only on the steps its arm runs, so its history would not advance on the others and the rate it reports would be wrong. Until 2.56.0 the assignment was not evaluated at all and the read silently returned the variable's initial value, 0. The contribution spelling of the same case is refused as R0407.",
+  "actions": [
+    "Assign the `ddt` outside the `if`, `case` or loop, and use the condition to select the value: `q = ddt(x); w = cond ? q : 0.0;`.",
+    "Or make the condition depend on parameters only."
+  ]
+}
