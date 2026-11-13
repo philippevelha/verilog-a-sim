@@ -1,0 +1,12 @@
+// multiphysics__seu_collection -- Spectre translation of circuits/multiphysics/seu_collection.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/seu/seu_parts.va"
+
+V1 (d 0) vsource dc=1.2
+X1 (d 0) strike_diffusion qdep=1e-14
+
+save V1:p X1.col
+tr tran stop=2e-08 step=1e-11

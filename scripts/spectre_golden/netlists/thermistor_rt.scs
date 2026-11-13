@@ -1,0 +1,13 @@
+// thermistor_rt -- Spectre translation of circuits/thermistor_rt.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/thermistor.va"
+
+V1 (a 0) vsource dc=1
+VT (tmp 0) vsource dc=298.15
+X1 (a 0 tmp) thermistor
+
+save V1:p
+sw dc dev=VT param=dc start=233.15 stop=373.15 step=1

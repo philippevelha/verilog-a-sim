@@ -1,0 +1,12 @@
+// multiphysics__bubble_ramp -- Spectre translation of circuits/multiphysics/bubble_ramp.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/bubble/bubble_parts.va"
+
+XD (p) bubble_drive g=0 gdot=5e-05 omega=2 nper=50
+XB (p) bubble tpoinc=3.14159265359 tskip=3.14159265359
+
+save p
+tr tran stop=20000 step=0.1

@@ -1,0 +1,34 @@
+// mwp_fiber -- fibre span: loss, group delay, and dispersion between carriers.
+//
+//   td    = len*ng/c + D*len*(lambda - lambda_ref),    lambda = c / nu (the parameter `nu`)
+//   A_out = 10^(-loss*len/20) * exp(j*phi) * A_in(t - td)
+//
+// Dispersion is applied per carrier: each wavelength gets its own group delay, which is what a
+// dispersive true-time-delay beamformer or a wavelength-multiplexed link uses. Dispersion
+// INSIDE the envelope (RF power fading of a double-sideband signal) is not in this model: build
+// it from a chain of mwp_ring all-pass sections (tests/fit_dispersion.py). The carrier
+// frequency is a parameter rather than the tag net because the delay must be known before the
+// run starts. No nonlinearity (Kerr, SBS), no PMD.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_fiber(i_re, i_im, o_re, o_im);
+    input i_re, i_im;
+    output o_re, o_im;
+    electrical i_re, i_im, o_re, o_im;
+    parameter real len    = 1000.0 from [0:inf);       // length, m
+    parameter real ng     = 1.4682 from (0:inf);       // group index
+    parameter real loss   = 0.2    from [0:inf);       // attenuation, dB/km
+    parameter real disp   = 17.0;                      // dispersion D, ps/(nm km)
+    parameter real nu     = 193.4  from (0:inf);       // carrier frequency of this bus, THz
+    parameter real nu_ref = 193.4  from (0:inf);       // frequency at which td = len*ng/c, THz
+    parameter real phi    = 0.0;                       // optical carrier phase, rad
+    parameter real td0    = -1.0;                      // override of len*ng/c, s (< 0: not used)
+    real g, td;
+    analog begin
+        g  = pow(10.0, -loss * len * 1e-3 / 20.0);
+        td = ((td0 >= 0.0) ? td0 : len * ng / `MWP_C)
+             + disp * 1e-6 * len * (`MWP_C / (nu * 1e12) - `MWP_C / (nu_ref * 1e12));
+        V(o_re) <+ absdelay(g * (V(i_re) * cos(phi) - V(i_im) * sin(phi)), td);
+        V(o_im) <+ absdelay(g * (V(i_re) * sin(phi) + V(i_im) * cos(phi)), td);
+    end
+endmodule

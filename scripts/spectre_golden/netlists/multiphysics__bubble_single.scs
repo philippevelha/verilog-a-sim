@@ -1,0 +1,30 @@
+// multiphysics__bubble_single -- Spectre translation of circuits/multiphysics/bubble_single.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/bubble/bubble_parts.va"
+
+XD1 (p1) bubble_drive g=0.05 omega=2 nper=50
+XB1 (p1) bubble tpoinc=3.14159265359 tskip=1884.95559215
+XD2 (p2) bubble_drive g=0.15 omega=2 nper=50
+XB2 (p2) bubble tpoinc=3.14159265359 tskip=1884.95559215
+XD3 (p3) bubble_drive g=0.3 omega=2 nper=50
+XB3 (p3) bubble tpoinc=3.14159265359 tskip=1884.95559215
+XD4 (p4) bubble_drive g=0.5 omega=2 nper=50
+XB4 (p4) bubble tpoinc=3.14159265359 tskip=1884.95559215
+XD5 (p5) bubble_drive g=1 omega=2 nper=50
+XB5 (p5) bubble tpoinc=3.14159265359 tskip=1884.95559215
+XD6 (p6) bubble_drive g=1.5 omega=2 nper=50
+XB6 (p6) bubble tpoinc=3.14159265359 tskip=1884.95559215
+XD7 (p7) bubble_drive g=2 omega=2 nper=50
+XB7 (p7) bubble tpoinc=3.14159265359 tskip=1884.95559215
+XD8 (p8) bubble_drive g=2.5 omega=2 nper=50
+XB8 (p8) bubble tpoinc=3.14159265359 tskip=1884.95559215
+XD9 (p9) bubble_drive g=3 omega=2 nper=50
+XB9 (p9) bubble tpoinc=3.14159265359 tskip=1884.95559215
+XD10 (p10) bubble_drive g=3.5 omega=2 nper=50
+XB10 (p10) bubble tpoinc=3.14159265359 tskip=1884.95559215
+
+save p1
+tr tran stop=2199.11485751 step=0.1

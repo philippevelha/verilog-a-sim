@@ -1,0 +1,23 @@
+// multiphysics__speaker_large -- Spectre translation of circuits/multiphysics/speaker_large.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/speaker/speaker_parts.va"
+
+V1 (p1 0) vsource dc=0 type=sine sinedc=0 ampl=20 freq=30
+V2 (p2 0) vsource dc=0 type=sine sinedc=0 ampl=20 freq=30
+VA (amb 0) vsource dc=293.15
+X1 (p1 0 t1 th1) driver
+XC1 (t1) chamber
+XH1 (t1 m1) horn
+XM1 (m1) mouth
+XT1 (th1 amb) vc_thermal
+X2 (p2 0 t2 th2) driver xk=1000 xbl=1000
+XC2 (t2) chamber
+XH2 (t2 m2) horn
+XM2 (m2) mouth
+XT2 (th2 amb) vc_thermal
+
+save m1 m2 X1.x X2.x
+tr tran stop=0.6 step=5e-05

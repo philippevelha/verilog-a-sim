@@ -1,0 +1,16 @@
+// lib_tee -- Spectre translation of circuits/lib_tee.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "tests/fixtures/lib/tee.va"
+ahdl_include "tests/fixtures/lib/scaler.va"
+
+V1 (a 0) vsource dc=2
+V2 (c 0) vsource dc=3
+X1 (a b c d) tee
+R1 (b 0) resistor r=1000
+R2 (d 0) resistor r=1000
+
+opts2 options save=lvlpub nestlvl=1
+op1 dc

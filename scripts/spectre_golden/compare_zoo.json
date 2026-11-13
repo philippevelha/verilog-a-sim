@@ -1,0 +1,488 @@
+[
+ {
+  "deck": "actuator_plant",
+  "kind": "tran",
+  "signals": 2,
+  "worst": 6.637039122631801e-05,
+  "worst_signal": "shaft",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "benchmark__cap_fast_edge",
+  "kind": "tran",
+  "signals": 3,
+  "worst": 0.008684786640569894,
+  "worst_signal": "V1:p",
+  "ok": false,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "benchmark__nand__bsim6",
+  "kind": "dc",
+  "signals": 1,
+  "worst": 2.2758472814991364e-05,
+  "worst_signal": "out",
+  "ok": true,
+  "wall_s": 0.3
+ },
+ {
+  "deck": "benchmark__nand__bsimbulk107",
+  "kind": "dc",
+  "signals": 1,
+  "worst": 0.2320882426338888,
+  "worst_signal": "out",
+  "ok": false,
+  "wall_s": 0.4
+ },
+ {
+  "deck": "benchmark__nand__bsimsoi",
+  "kind": "dc",
+  "signals": 1,
+  "worst": 0.9275731955102902,
+  "worst_signal": "out",
+  "ok": false,
+  "wall_s": 0.4
+ },
+ {
+  "deck": "benchmark__nand__hisim2",
+  "kind": "dc",
+  "signals": 1,
+  "worst": 4.1597316907068225e-07,
+  "worst_signal": "out",
+  "ok": true,
+  "wall_s": 0.9
+ },
+ {
+  "deck": "benchmark__nand__psp102",
+  "kind": "dc",
+  "signals": 1,
+  "worst": 5.25946947846659e-07,
+  "worst_signal": "out",
+  "ok": true,
+  "wall_s": 0.4
+ },
+ {
+  "deck": "benchmark__nand__zoo_nmos",
+  "kind": "dc",
+  "signals": 1,
+  "worst": 2.1280534019396667e-07,
+  "worst_signal": "out",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "delay_ac",
+  "kind": "ac",
+  "signals": 3,
+  "worst": 7.797090417964553e-05,
+  "worst_signal": "V1:p",
+  "ok": true,
+  "wall_s": 0.0
+ },
+ {
+  "deck": "fundamental_diagram",
+  "kind": "dc",
+  "signals": 4,
+  "worst": 4.832868153600572e-09,
+  "worst_signal": "v",
+  "ok": true,
+  "wall_s": 0.0
+ },
+ {
+  "deck": "hier_divider",
+  "kind": "op",
+  "signals": 3,
+  "worst": 9.999999999732445e-07,
+  "worst_signal": "mid",
+  "ok": true,
+  "wall_s": 0.0
+ },
+ {
+  "deck": "interferometer_ac",
+  "kind": "ac",
+  "signals": 3,
+  "worst": 7.523652147271528e-05,
+  "worst_signal": "out",
+  "ok": true,
+  "wall_s": 0.0
+ },
+ {
+  "deck": "lib_tee",
+  "kind": "op",
+  "signals": 6,
+  "worst": 0.0,
+  "worst_signal": "",
+  "ok": true,
+  "wall_s": 0.0
+ },
+ {
+  "deck": "multiphysics__breaker_interrupt",
+  "kind": "tran",
+  "signals": 2,
+  "worst": 0.02622696717851252,
+  "worst_signal": "p1",
+  "ok": false,
+  "wall_s": 0.3
+ },
+ {
+  "deck": "multiphysics__breaker_static",
+  "kind": "tran",
+  "signals": 2,
+  "worst": 1.965272441854558e-06,
+  "worst_signal": "p",
+  "ok": true,
+  "wall_s": 0.4
+ },
+ {
+  "deck": "multiphysics__bubble_cloud_check",
+  "kind": "tran",
+  "signals": 1,
+  "worst": 1.3166721396463339e-05,
+  "worst_signal": "pb",
+  "ok": true,
+  "wall_s": 55.6
+ },
+ {
+  "deck": "multiphysics__bubble_cloud_profiles",
+  "kind": "ac",
+  "signals": 201,
+  "worst": 8.760020815870397e-05,
+  "worst_signal": "p102",
+  "ok": true,
+  "wall_s": 0.2
+ },
+ {
+  "deck": "multiphysics__bubble_cloud_response",
+  "kind": "ac",
+  "signals": 1,
+  "worst": 9.966332465445646e-05,
+  "worst_signal": "p100",
+  "ok": true,
+  "wall_s": 1.1
+ },
+ {
+  "deck": "multiphysics__bubble_linear",
+  "kind": "ac",
+  "signals": 1,
+  "worst": 7.248074366032476e-05,
+  "worst_signal": "XB.y",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "multiphysics__grid_cascade",
+  "kind": "tran",
+  "signals": 2,
+  "worst": 0.000609483055776745,
+  "worst_signal": "XA1.w",
+  "ok": true,
+  "wall_s": 0.8
+ },
+ {
+  "deck": "multiphysics__grid_equal_area",
+  "kind": "tran",
+  "signals": 2,
+  "worst": 8.022253040151656e-05,
+  "worst_signal": "g2",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "multiphysics__mems_hysteresis",
+  "kind": "tran",
+  "signals": 1,
+  "worst": 0.0009001305322890055,
+  "worst_signal": "x",
+  "ok": true,
+  "wall_s": 0.5
+ },
+ {
+  "deck": "multiphysics__mems_pullin",
+  "kind": "dc",
+  "signals": 1,
+  "worst": 4.826976497989129e-07,
+  "worst_signal": "x",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "multiphysics__mems_resonance",
+  "kind": "ac",
+  "signals": 2,
+  "worst": 8.754362824590326e-05,
+  "worst_signal": "xhi",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "multiphysics__piezo_linear",
+  "kind": "tran",
+  "signals": 1,
+  "worst": 0.001310033075638045,
+  "worst_signal": "p",
+  "ok": false,
+  "wall_s": 1.5
+ },
+ {
+  "deck": "multiphysics__relay_bh",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 3.2077429134971114e-05,
+  "worst_signal": "X1.mm",
+  "ok": true,
+  "wall_s": 0.5
+ },
+ {
+  "deck": "multiphysics__relay_switch",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.0001960847419332875,
+  "worst_signal": "x3",
+  "ok": true,
+  "wall_s": 6.2
+ },
+ {
+  "deck": "multiphysics__reram_freq_500k",
+  "kind": "tran",
+  "signals": 3,
+  "worst": 2.897694512176053e-05,
+  "worst_signal": "X1.g",
+  "ok": true,
+  "wall_s": 1.0
+ },
+ {
+  "deck": "multiphysics__reram_freq_5k",
+  "kind": "tran",
+  "signals": 3,
+  "worst": 0.00046414627263821997,
+  "worst_signal": "X1.g",
+  "ok": true,
+  "wall_s": 1.0
+ },
+ {
+  "deck": "multiphysics__reram_freq_5meg",
+  "kind": "tran",
+  "signals": 3,
+  "worst": 3.388289529421239e-05,
+  "worst_signal": "X1.g",
+  "ok": true,
+  "wall_s": 1.0
+ },
+ {
+  "deck": "multiphysics__reram_sweep",
+  "kind": "tran",
+  "signals": 2,
+  "worst": 0.0010528780462469398,
+  "worst_signal": "X1.g",
+  "ok": false,
+  "wall_s": 0.4
+ },
+ {
+  "deck": "multiphysics__ring_bank",
+  "kind": "tran",
+  "signals": 12,
+  "worst": 6.0008721153105655e-05,
+  "worst_signal": "dr1",
+  "ok": true,
+  "wall_s": 0.5
+ },
+ {
+  "deck": "multiphysics__ring_selfheat",
+  "kind": "tran",
+  "signals": 3,
+  "worst": 0.0007183024361706961,
+  "worst_signal": "th2",
+  "ok": true,
+  "wall_s": 0.3
+ },
+ {
+  "deck": "multiphysics__seu_collection",
+  "kind": "tran",
+  "signals": 2,
+  "worst": 0.0012867163235216919,
+  "worst_signal": "V1:p",
+  "ok": false,
+  "wall_s": 0.4
+ },
+ {
+  "deck": "multiphysics__seu_sram",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.0002014218075834301,
+  "worst_signal": "qb1",
+  "ok": true,
+  "wall_s": 0.6
+ },
+ {
+  "deck": "multiphysics__tec_dtmax",
+  "kind": "dc",
+  "signals": 2,
+  "worst": 5.8321124259208556e-08,
+  "worst_signal": "V1:p",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "multiphysics__tec_energy",
+  "kind": "op",
+  "signals": 5,
+  "worst": 2.1711064771930502e-07,
+  "worst_signal": "V1:p",
+  "ok": true,
+  "wall_s": 0.0
+ },
+ {
+  "deck": "multiphysics__tec_pid",
+  "kind": "tran",
+  "signals": 1,
+  "worst": 0.00018531633223253384,
+  "worst_signal": "drv",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "nlcap_ramp",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.30341339889055724,
+  "worst_signal": "out",
+  "ok": false,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "portprobe_ac",
+  "kind": "ac",
+  "signals": 3,
+  "worst": 0.9998733725762652,
+  "worst_signal": "out",
+  "ok": false,
+  "wall_s": 0.0
+ },
+ {
+  "deck": "portprobe_dc",
+  "kind": "op",
+  "signals": 3,
+  "worst": 0.0,
+  "worst_signal": "",
+  "ok": true,
+  "wall_s": 0.0
+ },
+ {
+  "deck": "portprobe_ramp",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.3375554548857035,
+  "worst_signal": "out",
+  "ok": false,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "portprobe_sq",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.5735181686490893,
+  "worst_signal": "out",
+  "ok": false,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "rc_pulse",
+  "kind": "tran",
+  "signals": 3,
+  "worst": 0.00019945822676422452,
+  "worst_signal": "out",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "selfprobe_ramp",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.3375554548856992,
+  "worst_signal": "out",
+  "ok": false,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "snn__fig4_neuron",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.0009599085278206518,
+  "worst_signal": "vm",
+  "ok": true,
+  "wall_s": 2.1
+ },
+ {
+  "deck": "snn__fig5_neuron",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.0002854343820316045,
+  "worst_signal": "vm",
+  "ok": true,
+  "wall_s": 1.8
+ },
+ {
+  "deck": "snn__transistor__fig5_fit",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.00022641641001952225,
+  "worst_signal": "vm",
+  "ok": true,
+  "wall_s": 2.1
+ },
+ {
+  "deck": "snn__transistor__fig5_fitbc",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.0002832061699284042,
+  "worst_signal": "vm",
+  "ok": true,
+  "wall_s": 2.9
+ },
+ {
+  "deck": "snn__transistor__fig5_fitc",
+  "kind": "tran",
+  "signals": 4,
+  "worst": 0.00022416672424401424,
+  "worst_signal": "vm",
+  "ok": true,
+  "wall_s": 2.8
+ },
+ {
+  "deck": "tasks__current_limit",
+  "kind": "dc",
+  "signals": 2,
+  "worst": 0.4,
+  "worst_signal": "a",
+  "ok": false,
+  "wall_s": 0.0
+ },
+ {
+  "deck": "tasks__rc_logger",
+  "kind": "tran",
+  "signals": 1,
+  "worst": 0.00026272249761154427,
+  "worst_signal": "out",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "tasks__rc_watch",
+  "kind": "tran",
+  "signals": 1,
+  "worst": 0.00010502212744480612,
+  "worst_signal": "out",
+  "ok": true,
+  "wall_s": 0.1
+ },
+ {
+  "deck": "transformer",
+  "kind": "tran",
+  "signals": 6,
+  "worst": 4.670010957389599e-05,
+  "worst_signal": "L2:1",
+  "ok": true,
+  "wall_s": 0.1
+ }
+]

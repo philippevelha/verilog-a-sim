@@ -1,0 +1,17 @@
+// the library, as copied next to the netlists by run.sh
+simulator lang=spectre
+ahdl_include "mwp_laser.va"
+ahdl_include "mwp_mll.va"
+ahdl_include "mwp_pm.va"
+ahdl_include "mwp_mzm.va"
+ahdl_include "mwp_iqm.va"
+ahdl_include "mwp_coupler.va"
+ahdl_include "mwp_switch.va"
+ahdl_include "mwp_phase.va"
+ahdl_include "mwp_delay.va"
+ahdl_include "mwp_fiber.va"
+ahdl_include "mwp_ring.va"
+ahdl_include "mwp_pd.va"
+ahdl_include "mwp_bpd.va"
+ahdl_include "mwp_oamp.va"
+ahdl_include "mwp_noise.va"

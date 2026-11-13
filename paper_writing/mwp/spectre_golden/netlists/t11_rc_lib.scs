@@ -1,0 +1,10 @@
+// t11_rc_lib -- golden reference for t11 (a): 1 kOhm on 1 pF, 4 us, the library's mwp_noise: kT/C (strobe 25 ps)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+R0 (0 n0) resistor r=1000 isnoisy=no
+C0 (n0 0) capacitor c=1e-12
+XN0 (0 n0) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=1
+save n0
+tr tran stop=4e-06 maxstep=25e-12 strobeperiod=25e-12

@@ -1,0 +1,13 @@
+// multiphysics__hh_thin_fibre -- Spectre translation of circuits/multiphysics/hh_thin_fibre.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/axon/hh_cable.va"
+
+VP (p 0) vsource dc=0 type=pulse val0=0 val1=1 delay=0.001 rise=1e-05 fall=1e-05 width=0.0005 period=0.01
+G1 (0 stim p 0) vccs gm=2e-09
+X1 (stim) hh_cable N=10 len=0.001 a=2.5e-07 tc=18.5 tau_pump=10 probe_a=2 probe_b=8
+
+save X1.v\[5\] X1.dnai\[5\] X1.dki\[5\]
+tr tran stop=1 step=2e-05

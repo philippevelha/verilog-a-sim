@@ -1,0 +1,36 @@
+HEADER
+"PSFversion" "1.00"
+"Log Generator" "drlLog rev. 1.0"
+"Log Time Stamp" "Fri Nov 13 09:50:28 2026"
+"psfversion" "1.4.0"
+"simulator" "spectre"
+"version" "24.1.0.078"
+"date" "9:50:28 AM, Fri Nov 13, 2026"
+"design" "// hier_divider -- Spectre translation of circuits/hier_divider.net (scripts/spectre_golden/net2spectre.py)"
+"signalNameType" "spectre"
+"simMode" "Spectre"
+"measdgt" 0
+"ingold" 2
+"sst2usecolon" 0
+TYPE
+"analysisInst" STRUCT(
+"analysisType" STRING *
+"dataFile" STRING *
+"format" STRING *
+"parent" STRING *
+"sweepVariable" ARRAY ( * ) STRING *
+"description" STRING *
+)
+VALUE
+"op1-dc" "analysisInst" (
+"dc"
+"op1.dc"
+"PSF"
+""
+()
+"DC Analysis `op1'"
+) PROP(
+"data_type" "scalar"
+)
+
+END

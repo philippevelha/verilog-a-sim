@@ -1,0 +1,47 @@
+// multiphysics__ring_bank -- Spectre translation of circuits/multiphysics/ring_bank.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/ringbank/ring_parts.va"
+
+VW1 (w1 0) vsource dc=1550 type=pwl wave=[ \
+    0 1550 0.03 1550 0.03001 1550.2 ]
+VW2 (w2 0) vsource dc=1550.8
+VW3 (w3 0) vsource dc=1551.6
+VW4 (w4 0) vsource dc=1552.4
+VP1 (p1 0) vsource dc=1
+VP2 (p2 0) vsource dc=1
+VP3 (p3 0) vsource dc=1 type=pwl wave=[ \
+    0 1 0.06 1 0.06001 4 ]
+VP4 (p4 0) vsource dc=1
+XL1 (p1 w1 in1 wl1) laser
+XL2 (p2 w2 in2 wl2) laser
+XL3 (p3 w3 in3 wl3) laser
+XL4 (p4 w4 in4 wl4) laser
+XR1 (in1 wl1 th1 dr1 t1) ring lambda0=1549.75
+XR2 (in2 wl2 th2 dr2 t2) ring lambda0=1550.5
+XR3 (in3 wl3 th3 dr3 t3) ring lambda0=1551.3
+XR4 (in4 wl4 th4 dr4 t4) ring lambda0=1552.15
+XC1 (t1) thermal_cap
+XC2 (t2) thermal_cap
+XC3 (t3) thermal_cap
+XC4 (t4) thermal_cap
+XG1 (t1 0) thermal_res
+XG2 (t2 0) thermal_res
+XG3 (t3 0) thermal_res
+XG4 (t4 0) thermal_res
+XX12 (t1 t2) thermal_res r=16000
+XX23 (t2 t3) thermal_res r=16000
+XX34 (t3 t4) thermal_res r=16000
+XH1 (u1 t1) heater
+XH2 (u2 t2) heater
+XH3 (u3 t3) heater
+XH4 (u4 t4) heater
+XK1 (in1 dr1 u1) lock kp=5 ki=3000
+XK2 (in2 dr2 u2) lock kp=5 ki=3000
+XK3 (in3 dr3 u3) lock kp=5 ki=3000
+XK4 (in4 dr4 u4) lock kp=5 ki=3000
+
+save in1 in2 in3 in4 dr1 dr2 dr3 dr4 u1 u2 u3 u4
+tr tran stop=0.1 step=5e-05

@@ -1,0 +1,212 @@
+HEADER
+"PSFversion" "1.00"
+"simulator" "spectre"
+"version" "24.1.0.078"
+"date" "5:07:18 PM, Thur Nov 12, 2026"
+"design" "// Second attempt. The first stopped in the stabilization transient: the photodiode's internal node had no"
+"analysis type" "fi.pss_hb"
+"analysis name" "hbo"
+"analysis description" "Harmonic Balance Steady State Analysis `hbo': largefund = 9.97 GHz"
+"xVecSorted" "ascending"
+"tolerance.relative" 1.000000000000000e-06
+"largefundname" "largeTone"
+"largefundfreq" "9.97 GHz"
+"largefundmaxharm" "10"
+TYPE
+"sweep" FLOAT DOUBLE PROP(
+"key" "sweep"
+)
+"Real" COMPLEX DOUBLE PROP(
+"units" ""
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Tau" COMPLEX DOUBLE PROP(
+"units" "N*m"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Alpha" COMPLEX DOUBLE PROP(
+"units" "rads/s^2"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Omega" COMPLEX DOUBLE PROP(
+"units" "rads/s"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Theta" COMPLEX DOUBLE PROP(
+"units" "rads"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"F" COMPLEX DOUBLE PROP(
+"units" "N"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Imp" COMPLEX DOUBLE PROP(
+"units" "m/s^3"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Acc" COMPLEX DOUBLE PROP(
+"units" "m/s^2"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Vel" COMPLEX DOUBLE PROP(
+"units" "m/s"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Pos" COMPLEX DOUBLE PROP(
+"units" "m"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Phi" COMPLEX DOUBLE PROP(
+"units" "Wb"
+"key" "node"
+"tolerance" 1.000000000000000e-09
+)
+"V" COMPLEX DOUBLE PROP(
+"units" "V"
+"key" "node"
+"tolerance" 1.000000000000000e-09
+)
+"I" COMPLEX DOUBLE PROP(
+"units" "A"
+"key" "branch"
+"tolerance" 1.000000000000000e-15
+)
+"MMF" COMPLEX DOUBLE PROP(
+"units" "A*turn"
+"key" "node"
+"tolerance" 1.000000000000000e-12
+)
+"Wb" COMPLEX DOUBLE PROP(
+"units" "Wb"
+"key" "node"
+"tolerance" 1.000000000000000e-09
+)
+"Temp" COMPLEX DOUBLE PROP(
+"units" "C"
+"key" "node"
+"tolerance" 1.000000000000000e-04
+)
+"Pwr" COMPLEX DOUBLE PROP(
+"units" "W"
+"key" "node"
+"tolerance" 1.000000000000000e-09
+)
+"U" COMPLEX DOUBLE PROP(
+"units" ""
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"V/Sec" COMPLEX DOUBLE PROP(
+"units" "V/s"
+"key" "node"
+"tolerance" 9.999999999999999e-05
+)
+"I/Sec" COMPLEX DOUBLE PROP(
+"units" "A/s"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"1/Sec" COMPLEX DOUBLE PROP(
+"units" "1/s"
+"key" "node"
+"tolerance" 9.999999999999999e-05
+)
+"HOD" COMPLEX DOUBLE PROP(
+"units" ""
+"key" "node"
+"tolerance" 1.000000000000000e-02
+)
+"Q" COMPLEX DOUBLE PROP(
+"units" "coul"
+"key" "node"
+"tolerance" 1.000000000000000e-14
+)
+"Efield" COMPLEX DOUBLE PROP(
+"units" "V/m"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+"sigtype" "optical"
+)
+"harmUnit" COMPLEX DOUBLE PROP(
+"units" "harmonic"
+"key" "harmonic Index"
+)
+SWEEP
+"freq" "sweep" PROP(
+"sweep_direction" 0
+"units" "Hz"
+"plot" 0
+"grid" 1
+)
+TRACE
+"rf" "V"
+"an" "V"
+"0" "U"
+"largeTone_harm_index" "harmUnit"
+VALUE
+"freq" 0.000000000000000e+00
+"rf" (-1.548431105785712e-17 0.000000000000000e+00)
+"an" (1.999999918421913e-01 0.000000000000000e+00)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (0.000000000000000e+00 0.000000000000000e+00)
+"freq" 9.963510348244751e+09
+"rf" (-2.801361992018631e-01 -2.594253576405788e+00)
+"an" (9.828028285616362e-02 1.993476554693163e-01)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (1.000000000000000e+00 0.000000000000000e+00)
+"freq" 1.992702069648950e+10
+"rf" (-1.348471422953448e-09 -1.558685753096885e-10)
+"an" (-8.079418826581856e-10 8.037146566466472e-09)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (2.000000000000000e+00 0.000000000000000e+00)
+"freq" 2.989053104473425e+10
+"rf" (-1.200509805329997e-03 3.944658592508039e-03)
+"an" (4.198040991075659e-02 1.243143560132754e-02)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (3.000000000000000e+00 0.000000000000000e+00)
+"freq" 3.985404139297900e+10
+"rf" (2.188564575439954e-11 5.502658966488820e-12)
+"an" (7.888700896127819e-11 -3.268780915737141e-10)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (4.000000000000000e+00 0.000000000000000e+00)
+"freq" 4.981755174122375e+10
+"rf" (4.059168929110400e-05 8.806351867047135e-05)
+"an" (1.680887395580415e-03 -7.833242366004702e-04)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (5.000000000000000e+00 0.000000000000000e+00)
+"freq" 5.978106208946851e+10
+"rf" (-1.561525483792177e-12 2.087298812526798e-12)
+"an" (4.863301102453112e-11 3.632258886905035e-11)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (6.000000000000000e+00 0.000000000000000e+00)
+"freq" 6.974457243771326e+10
+"rf" (1.008846553568376e-06 3.785524326119656e-07)
+"an" (1.026297531874059e-05 -2.759631775696426e-05)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (7.000000000000000e+00 0.000000000000000e+00)
+"freq" 7.970808278595801e+10
+"rf" (-1.118119435029953e-13 1.206593249637332e-13)
+"an" (3.797997745448574e-12 3.503495479075264e-12)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (8.000000000000000e+00 0.000000000000000e+00)
+"freq" 8.967159313420276e+10
+"rf" (-4.843484891241875e-10 -5.501201373359014e-09)
+"an" (-1.948279145738417e-07 1.759696969131621e-08)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (9.000000000000000e+00 0.000000000000000e+00)
+"freq" 9.963510348244751e+10
+"rf" (-2.271285518368851e-12 -1.379616440222036e-12)
+"an" (-5.424778480560922e-11 8.971843990419622e-11)
+"0" (0.000000000000000e+00 0.000000000000000e+00)
+"largeTone_harm_index" (1.000000000000000e+01 0.000000000000000e+00)
+END

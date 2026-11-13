@@ -1,0 +1,30 @@
+// t07_ttd_ac -- golden reference for t07 (a): dispersive WDM true-time-delay beamformer, four elements
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+Vrf (rf 0) vsource dc=0 mag=1
+Vb (vb 0) vsource dc=2
+Vk (k 0) vsource dc=3
+XL0 (a0_re a0_im nu0) mwp_laser p_mw=4 nu0=193.4
+XM0 (a0_re a0_im b0_re b0_im x0_re x0_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+XF0 (b0_re b0_im c0_re c0_im) mwp_fiber len=918 disp=17 loss=0 nu=193.4 nu_ref=193.4 td0=1e-9
+XD0 (c0_re c0_im an0 k) mwp_pd resp=0.8
+Vs0 (an0 0) vsource dc=0
+XL1 (a1_re a1_im nu1) mwp_laser p_mw=4 nu0=193.5
+XM1 (a1_re a1_im b1_re b1_im x1_re x1_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+XF1 (b1_re b1_im c1_re c1_im) mwp_fiber len=918 disp=17 loss=0 nu=193.5 nu_ref=193.4 td0=1e-9
+XD1 (c1_re c1_im an1 k) mwp_pd resp=0.8
+Vs1 (an1 0) vsource dc=0
+XL2 (a2_re a2_im nu2) mwp_laser p_mw=4 nu0=193.6
+XM2 (a2_re a2_im b2_re b2_im x2_re x2_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+XF2 (b2_re b2_im c2_re c2_im) mwp_fiber len=918 disp=17 loss=0 nu=193.6 nu_ref=193.4 td0=1e-9
+XD2 (c2_re c2_im an2 k) mwp_pd resp=0.8
+Vs2 (an2 0) vsource dc=0
+XL3 (a3_re a3_im nu3) mwp_laser p_mw=4 nu0=193.7
+XM3 (a3_re a3_im b3_re b3_im x3_re x3_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+XF3 (b3_re b3_im c3_re c3_im) mwp_fiber len=918 disp=17 loss=0 nu=193.7 nu_ref=193.4 td0=1e-9
+XD3 (c3_re c3_im an3 k) mwp_pd resp=0.8
+Vs3 (an3 0) vsource dc=0
+save Vs0:p Vs1:p Vs2:p Vs3:p
+ac1 ac start=2e9 stop=20e9 lin=36

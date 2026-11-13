@@ -1,0 +1,29 @@
+// 29 -- does Spectre's hbnoise apply a delay at the noise frequency? A direct, driven test.
+//   A resistor's thermal noise on node x (4kTR = 1.66e-17 V^2/Hz for 1 kOhm) is added to a copy of
+//   itself delayed by td = 1 ns:  V(out) = V(x)(t) + V(x)(t - td), so the noise at out is
+//       4kTR * |1 + exp(-j 2 pi f td)|^2 = 4kTR * 4 cos^2(pi f td),   nulls at 0.5, 1.5 GHz.
+//   A 1 GHz sine on a separate resistor makes the circuit periodic, so hb/hbnoise run; it does not
+//   touch the noise path. The plain `noise` analysis of the same circuit is the control (deck 03
+//   showed it applies absdelay correctly). Two delays: the library's mwp_delay (absdelay) and
+//   Spectre's own tline.
+//   If hbnoise ignores the delay at the noise frequency, out is 4 * 4kTR = 6.6e-17 V^2/Hz, flat.
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-12 iabstol=1e-18 temp=27 tnom=27 save=selected
+Vd (d 0) vsource type=sine ampl=1 freq=1e9 fundname="fd"
+Rd (d 0) resistor r=1k isnoisy=no
+Rn (x 0) resistor r=1k
+Za (x 0 y yi) mwp_delay td=1e-9
+Ea (out m x 0) vcvs gain=1
+Eb (m 0 y 0) vcvs gain=1
+Tt (x 0 yt 0) tline z0=1e9 td=1e-9
+Rt (yt 0) resistor r=1e9 isnoisy=no
+Ec (outt mt x 0) vcvs gain=1
+Ed (mt 0 yt 0) vcvs gain=1
+save out outt
+nzc (out 0) noise start=1e7 stop=2e9 lin=200
+nzt (outt 0) noise start=1e7 stop=2e9 lin=200
+hb1 hb funds=["fd"] maxharms=[4] errpreset=conservative
+hbn (out 0) hbnoise start=1e7 stop=2e9 lin=200 maxsideband=4
+hbt (outt 0) hbnoise start=1e7 stop=2e9 lin=200 maxsideband=4

@@ -1,0 +1,20 @@
+// t07_beam_el3 -- golden reference for t07 (b): phase-shifter beamformer element 3, set for 12 GHz
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=4
+X2 (a_re a_im 0 0 s_re s_im c_re c_im) mwp_coupler
+Vi (vi 0) vsource dc=0 mag=1 phase=0
+Vq (vq 0) vsource dc=0 mag=1 phase=-90
+Vbi (bi 0) vsource dc=4
+Vbq (bq 0) vsource dc=4
+Vbp (bp 0) vsource dc=2
+X3 (s_re s_im m_re m_im vi vq bi bq bp) mwp_iqm vpi=4
+X4 (c_re c_im p_re p_im 0) mwp_phase phi0=-2.82493581141
+X5 (m_re m_im p_re p_im u_re u_im v_re v_im) mwp_coupler
+Vk (k 0) vsource dc=3
+X6 (u_re u_im an k) mwp_pd resp=0.8
+Vs (an 0) vsource dc=0
+save Vs:p
+ac1 ac start=2e9 stop=20e9 lin=36

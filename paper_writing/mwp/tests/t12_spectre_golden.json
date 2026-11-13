@@ -1,0 +1,170 @@
+{
+ "test": "t12_spectre_golden",
+ "ok": true,
+ "wall_s": 33.4,
+ "rows": [
+  {
+   "what": "01 DC transfer: max |i - Spectre| / max |i|",
+   "sim": 5.615127308435108e-08,
+   "ref": 0.0,
+   "err": 5.615127308435108e-08,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "01 AC response 0.1-100 GHz (complex): max |H - Spectre| / |H(0)|",
+   "sim": 8.639142387030723e-05,
+   "ref": 0.0,
+   "err": 8.639142387030723e-05,
+   "tol": 0.0003,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "01 output noise at 100 MHz against Spectre",
+   "sim": 1.668227e-17,
+   "ref": 1.6682251655453522e-17,
+   "err": 1.0996445117333046e-06,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "what": "01 two tones: fundamental against Spectre",
+   "sim": 0.0006225247201314346,
+   "ref": 0.0006225247405527632,
+   "err": 3.280404336061306e-08,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "01 two tones: IMD3 (2f1 - f2) against Spectre",
+   "sim": 1.9279485769062476e-06,
+   "ref": 1.9279527703310438e-06,
+   "err": 2.1750661430767194e-06,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "02 filter response 1-20 GHz (complex): max |H - Spectre| / max |H|",
+   "sim": 8.677393080610426e-05,
+   "ref": 0.0,
+   "err": 8.677393080610426e-05,
+   "tol": 0.0003,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "03 noise spectrum 0.1 MHz - 3 GHz: max relative deviation from Spectre",
+   "sim": 1.0587539557738168e-05,
+   "ref": 0.0,
+   "err": 1.0587539557738168e-05,
+   "tol": 0.0001,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "07 four element responses 2-20 GHz (complex): max |H - Spectre| / |H|",
+   "sim": 8.683955875657794e-05,
+   "ref": 0.0,
+   "err": 8.683955875657794e-05,
+   "tol": 0.0003,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "20 harmonic 2f: our transient against Spectre's harmonic balance",
+   "sim": 0.003389902065322267,
+   "ref": 0.003389901915525237,
+   "err": 4.418919294655657e-08,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "20 harmonic 4f: our transient against Spectre's harmonic balance",
+   "sim": 0.0004831746013604096,
+   "ref": 0.0004831744230029401,
+   "err": 3.6913681899500683e-07,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "20 mean photocurrent against Spectre",
+   "sim": 0.0038980182694141738,
+   "ref": 0.00389801835098437,
+   "err": 2.0926067811712752e-08,
+   "tol": 1e-06,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "21 IF voltage at 80 MHz: our transient against Spectre's harmonic balance",
+   "sim": 0.004425295478124354,
+   "ref": 0.004425186764790008,
+   "err": 2.456694827232759e-05,
+   "tol": 0.0003,
+   "rel": true,
+   "unit": "V",
+   "ok": true
+  },
+  {
+   "what": "21 mean voltage against Spectre",
+   "sim": 0.016208903286034537,
+   "ref": 0.01620871836458371,
+   "err": 1.1408764509704558e-05,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "V",
+   "ok": true
+  },
+  {
+   "what": "23 oscillation frequency: our transient against Spectre's harmonic balance",
+   "sim": 9962964063.335657,
+   "ref": 9963510348.244751,
+   "err": 5.482855840964671e-05,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "what": "23 oscillation amplitude against Spectre",
+   "sim": 2.6202791538745727,
+   "ref": 2.609334763650975,
+   "err": 0.004194322007301339,
+   "tol": 0.005,
+   "rel": true,
+   "unit": "V",
+   "ok": true
+  },
+  {
+   "note": "23: 246748 points, 30 s; Spectre's phase noise for this deck is NOT compared (open question, README)"
+  },
+  {
+   "what": "29 noise of a signal plus its delayed copy, 10 MHz - 2 GHz: max relative deviation from Spectre",
+   "sim": 2.152330672977598e-05,
+   "ref": 0.0,
+   "err": 2.152330672977598e-05,
+   "tol": 0.0001,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  }
+ ]
+}

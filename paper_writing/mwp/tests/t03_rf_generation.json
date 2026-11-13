@@ -1,0 +1,243 @@
+{
+ "test": "t03_rf_generation",
+ "ok": true,
+ "wall_s": 1.65,
+ "rows": [
+  {
+   "what": "beat at 1 GHz: amplitude R sqrt(P1 P2)",
+   "sim": 0.0011313702632218333,
+   "ref": 0.001131370849898476,
+   "err": 5.185537906213002e-07,
+   "tol": 1e-06,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "beat at 1 GHz: mean current R (P1+P2)/2",
+   "sim": 0.0011999996324116536,
+   "ref": 0.0012000000000000001,
+   "err": 3.0632362206690905e-07,
+   "tol": 1e-06,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "beat at 1 GHz: frequency error / df",
+   "sim": -2.1722947678134837e-08,
+   "ref": 0.0,
+   "err": 2.1722947678134837e-08,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "beat at 10 GHz: amplitude R sqrt(P1 P2)",
+   "sim": 0.0011313708226813974,
+   "ref": 0.001131370849898476,
+   "err": 2.4056726082955267e-08,
+   "tol": 1e-06,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "beat at 10 GHz: mean current R (P1+P2)/2",
+   "sim": 0.0011999999361441594,
+   "ref": 0.0012000000000000001,
+   "err": 5.321320062830666e-08,
+   "tol": 1e-06,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "beat at 10 GHz: frequency error / df",
+   "sim": 6.477204075712804e-09,
+   "ref": 0.0,
+   "err": 6.477204075712804e-09,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "beat at 40 GHz: amplitude R sqrt(P1 P2)",
+   "sim": 0.0011313707588703568,
+   "ref": 0.001131370849898476,
+   "err": 8.045825053319655e-08,
+   "tol": 1e-06,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "beat at 40 GHz: mean current R (P1+P2)/2",
+   "sim": 0.0012000000330203106,
+   "ref": 0.0012000000000000001,
+   "err": 2.751692537023009e-08,
+   "tol": 1e-06,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "beat at 40 GHz: frequency error / df",
+   "sim": 7.1582091067663084e-09,
+   "ref": 0.0,
+   "err": 7.1582091067663084e-09,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "beat at 100 GHz: amplitude R sqrt(P1 P2)",
+   "sim": 0.0011313704782389392,
+   "ref": 0.001131370849898476,
+   "err": 3.2850372355539084e-07,
+   "tol": 1e-06,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "beat at 100 GHz: mean current R (P1+P2)/2",
+   "sim": 0.0011999996916173424,
+   "ref": 0.0012000000000000001,
+   "err": 2.5698554811214253e-07,
+   "tol": 1e-06,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "beat at 100 GHz: frequency error / df",
+   "sim": 1.2711330528043932e-08,
+   "ref": 0.0,
+   "err": 1.2711330528043932e-08,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "null bias, m = 2.356: 2f = 20 GHz amplitude R P J2(m)",
+   "sim": 0.0033899019176149296,
+   "ref": 0.0033899019155252366,
+   "err": 6.164464500879981e-10,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "null bias, m = 2.356: 4f = 40 GHz amplitude R P J4(m)",
+   "sim": 0.0004831744105028866,
+   "ref": 0.00048317442300292973,
+   "err": 2.5870663897337826e-08,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "null bias: odd harmonics f, 3f / (R P)",
+   "sim": 7.042731545003622e-07,
+   "ref": 0.0,
+   "err": 7.042731545003622e-07,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "peak bias, m = 2.356: 2f = 20 GHz amplitude R P J2(m)",
+   "sim": 0.003389901886497935,
+   "ref": 0.0033899019155252366,
+   "err": 8.562873662098523e-09,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "peak bias, m = 2.356: 4f = 40 GHz amplitude R P J4(m)",
+   "sim": 0.00048317441248960433,
+   "ref": 0.00048317442300292973,
+   "err": 2.1758861600568133e-08,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "peak bias: odd harmonics f, 3f / (R P)",
+   "sim": 8.485138511921306e-09,
+   "ref": 0.0,
+   "err": 8.485138511921306e-09,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "null, J2 = 0 bias, m = 5.136: 2f suppressed, / (R P)",
+   "sim": 1.0111914679767742e-07,
+   "ref": 0.0,
+   "err": 1.0111914679767742e-07,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "null, J2 = 0 bias, m = 5.136: 4f = 40 GHz amplitude R P J4(m)",
+   "sim": 0.0031747085027823124,
+   "ref": 0.0031747076970560697,
+   "err": 2.537954103355343e-07,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "null, J2 = 0 bias: odd harmonics f, 3f / (R P)",
+   "sim": 2.5777610719904727e-07,
+   "ref": 0.0,
+   "err": 2.5777610719904727e-07,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "discriminator output PSD 0.1 MHz-3 GHz: max relative deviation from closed form",
+   "sim": 6.710329745973631e-06,
+   "ref": 0.0,
+   "err": 6.710329745973631e-06,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "low-frequency plateau (R P)^2 4 pi td^2 lw",
+   "sim": 3.21699077137909e-14,
+   "ref": 3.2169908772759485e-14,
+   "err": 3.291798526966742e-08,
+   "tol": 0.001,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "note": "RIN of -140 dB/Hz would add 6.40e-17 V^2/Hz per diode; it cancels in the balanced detector (floor is shot + load thermal, 3.39e-18)"
+  },
+  {
+   "note": "at the first null f = 1/td = 1 GHz the output is 3.392e-18 V^2/Hz (floor 3.392e-18)"
+  }
+ ]
+}

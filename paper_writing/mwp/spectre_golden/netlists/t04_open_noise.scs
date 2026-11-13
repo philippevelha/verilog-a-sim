@@ -1,0 +1,15 @@
+// t04_open_noise -- golden reference for t04 (estimate): loop opened at the modulator: noise at the detector load
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=10 rin=3.1622776601683794e-16
+Vb (vb 0) vsource dc=2
+Vrf (rf 0) vsource dc=0 mag=1
+X2 (a_re a_im b_re b_im bb_re bb_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+X3 (b_re b_im c_re c_im) mwp_delay td=5.02e-9
+Vk (k 0) vsource dc=3
+X4 (c_re c_im an k) mwp_pd resp=0.8
+RL (an 0) resistor r=50
+save an
+nz (an 0) noise start=1e9 stop=1e11 dec=2 iprobe=Vrf

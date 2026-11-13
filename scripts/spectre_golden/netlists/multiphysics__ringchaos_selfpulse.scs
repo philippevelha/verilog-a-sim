@@ -1,0 +1,21 @@
+// multiphysics__ringchaos_selfpulse -- Spectre translation of circuits/multiphysics/ringchaos_selfpulse.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/ringchaos/rc_parts.va"
+
+VW (wctl 0) vsource dc=1550.155016
+VP1 (p1 0) vsource dc=0 type=pwl wave=[ \
+    0 0 2e-08 5 2e-06 5 4e-06 0.4 ]
+VP2 (p2 0) vsource dc=0 type=pwl wave=[ \
+    0 0 2e-08 6 ]
+XL1 (p1 wctl a0r a0i wl1) laser
+X1 (a0r a0i a1r a1i wl1 t1) siring
+XD1 (a1r a1i o1) detector
+XL2 (p2 wctl b0r b0i wl2) laser
+X2 (b0r b0i b1r b1i wl2 t2) siring
+XD2 (b1r b1i o2) detector
+
+save o1 o2
+tr tran stop=2e-05 step=2e-10

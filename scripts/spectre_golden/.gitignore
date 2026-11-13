@@ -1,0 +1,5 @@
+golden/
+raw/
+logs/
+*.tar.gz
+__pycache__/

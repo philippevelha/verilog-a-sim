@@ -1,0 +1,63 @@
+{
+ "test": "t05_waveform_generation",
+ "ok": true,
+ "wall_s": 7.8,
+ "rows": [
+  {
+   "what": "16-QAM at 20 GHz: rms error vector against the exact symbols",
+   "sim": 9.245204580650693e-05,
+   "ref": 0.0,
+   "err": 9.245204580650693e-05,
+   "tol": 0.0003,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "EVM against the ideal 16-QAM grid = the modulator's sine compression (closed form)",
+   "sim": 0.01007446250164048,
+   "ref": 0.010084849336468481,
+   "err": 1.0386834828001248e-05,
+   "tol": 0.0001,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "EVM on the ideal grid: 1.007 % at a peak drive of 0.3 Vpi; 45019 points, 6.3 s"
+  },
+  {
+   "what": "chirp: max |i - closed form| / amplitude, every time point",
+   "sim": 4.080385509984126e-05,
+   "ref": 0.0,
+   "err": 4.080385509984126e-05,
+   "tol": 0.0001,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "chirp: instantaneous frequency (Hilbert), rms deviation from f0 - K(t - T/2), 1-9 ns",
+   "sim": 24439757.75865922,
+   "ref": 0.0,
+   "err": 24439757.75865922,
+   "tol": 50000000.0,
+   "rel": false,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "what": "chirp rate",
+   "sim": -4.000302390410891e+17,
+   "ref": -4e+17,
+   "err": 7.559760272272e-05,
+   "tol": 0.005,
+   "rel": true,
+   "unit": "Hz/s",
+   "ok": true
+  },
+  {
+   "note": "swept band 4.00 GHz, time-bandwidth product 40.0; peak phase deviation 31.4 rad = 10.0 Vpi of drive"
+  }
+ ]
+}

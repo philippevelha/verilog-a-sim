@@ -1,0 +1,36 @@
+// 27 -- 26 (delay as Spectre tline) with what 26's log advised: longer tstab, more harmonics, more Newton iterations.
+//       26 found 9.96353 GHz in tstab, then stopped at the iteration limit.
+// discontinuity (SPECTRE-16780, then minimum time step). The detector now has a 40 GHz pole, and the
+// pinned node is the modulator drive instead of Spectre's own choice (the detector's internal node).
+// 23 -- the same oscillator by autonomous harmonic balance, then its phase noise.
+//       Reference for the estimate of t04: L(f) = delta/(2 pi f tau)^2 = -104.0 dBc/Hz at 100 kHz (Rt noiseless here, as there).
+// STAGE 2: hb/hbnoise parameter names checked against the help text of SPECTRE 24.10.078 (funds, fundfreqs,
+// maxharms, tstab, maxsideband, noisetype, noiseout). Not yet run.
+// Autonomous form, corrected from this installation's help_hb.txt: a node pair on the hb line marks an
+// oscillator, fundfreqs is the frequency guess, the kick source starts it during tstab. Still never run.
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+X1 (a_re a_im nu) mwp_laser p_mw=10.0 rin=3.1622776601683794e-16
+Vb (vb 0) vsource dc=2
+X2 (a_re a_im b_re b_im bb_re bb_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+// the delay line as two of Spectre's own lossless transmission lines (re and im), each driven by the
+// modulator's ideal output and terminated in its own impedance at the far end: V(c) = V(b)(t - td)
+T3r (b_re 0 c_re 0) tline z0=50 td=5.02e-9
+T3i (b_im 0 c_im 0) tline z0=50 td=5.02e-9
+RTr (c_re 0) resistor r=50 isnoisy=no
+RTi (c_im 0) resistor r=50 isnoisy=no
+Vk (k 0) vsource dc=3
+X4 (c_re c_im an k) mwp_pd resp=0.8 f3db=40e9
+RL (an 0) resistor r=50.0
+G1 (rf 0 an 0) vccs gm=0.25
+Rt (rf 0) resistor r=50.0 isnoisy=no
+Lt (rf 0) inductor l=1.591549431e-11
+Ct (rf 0) capacitor c=1.591549431e-11
+// a single kick as a PWL: Spectre refuses a `pulse` source (periodic) in an autonomous analysis (CMI-2208)
+Ik (0 rf) isource type=pwl wave=[0 0 10e-12 1e-3 60e-12 1e-3 70e-12 0]
+save rf an
+hbo (rf 0) hb fundfreqs=[9.96353e9] maxharms=[16] tstab=300e-9 maxperiods=300 pinnode=rf errpreset=conservative
+hbn (rf 0) hbnoise start=1e3 stop=1e8 dec=5 maxsideband=10 noisetype=timeaverage noiseout=[pm]

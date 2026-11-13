@@ -1,0 +1,28 @@
+// 00 -- every module compiles and a DC point exists (portability smoke test)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+X1  (a_re a_im nu)                                mwp_laser p_mw=10 lw=1e5 rin=1e-15
+X2  (m_re m_im nu2)                               mwp_mll pavg_mw=1 frep=1e9 fwhm=2e-12
+Vrf (rf 0) vsource dc=0
+Vb  (vb 0) vsource dc=2
+X3  (a_re a_im b_re b_im rf 0)                    mwp_pm vpi=4
+X4  (b_re b_im c_re c_im cb_re cb_im rf 0 vb)     mwp_mzm vpi=4 vpi_dc=4 f3db=20e9
+X5  (c_re c_im d_re d_im rf rf vb vb vb)          mwp_iqm vpi=4
+X6  (d_re d_im m_re m_im e_re e_im f_re f_im)     mwp_coupler kappa=0.5
+X7  (e_re e_im f_re f_im g_re g_im h_re h_im vb)  mwp_switch vsw=4
+X8  (g_re g_im i_re i_im vb)                      mwp_phase phi0=0.3 kphi=0.1
+X9  (i_re i_im j_re j_im)                         mwp_delay td=100e-12
+X10 (j_re j_im k_re k_im)                         mwp_fiber len=100 disp=17
+X11 (k_re k_im l_re l_im dr_re dr_im nu 0)        mwp_ring q1=2e4 q2=2e4 qi=1e5
+X12 (l_re l_im o_re o_im)                         mwp_oamp g0_db=10 psat=10
+Vk  (kk 0) vsource dc=3
+X13 (o_re o_im an kk)                             mwp_pd resp=0.8 f3db=30e9
+X14 (h_re h_im dr_re dr_im out 0)                 mwp_bpd resp=0.8
+X15 (out 0)                                       mwp_noise psd=1e-22 fmax=10e9
+RL  (an 0) resistor r=50
+RO  (out 0) resistor r=50
+save an out a_re nu
+op dc

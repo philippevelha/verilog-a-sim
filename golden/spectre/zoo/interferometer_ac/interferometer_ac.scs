@@ -1,0 +1,13 @@
+// interferometer_ac -- Spectre translation of circuits/interferometer_ac.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/interferometer.va"
+
+V1 (in 0) vsource dc=0 mag=1 phase=0
+R1 (in out) resistor r=500
+D1 (out 0) interferometer r=1000 t1=0 t2=1e-06
+
+opts2 options save=lvlpub nestlvl=1
+ac1 ac start=50000 stop=2550000 lin=50

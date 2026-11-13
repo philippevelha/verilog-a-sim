@@ -1,0 +1,123 @@
+{
+ "test": "t02_ring_filter",
+ "ok": true,
+ "wall_s": 1.02,
+ "rows": [
+  {
+   "what": "through spectrum, +-60 GHz: max |T - Lorentzian|",
+   "sim": 4.864699787443527e-08,
+   "ref": 0.0,
+   "err": 4.864699787443527e-08,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "drop spectrum: max |D - Lorentzian|",
+   "sim": 4.922925861405858e-08,
+   "ref": 0.0,
+   "err": 4.922925861405858e-08,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "drop FWHM = nu/Q_L (0.5 GHz grid)",
+   "sim": 21.0,
+   "ref": 21.274,
+   "err": 0.2740000000000009,
+   "tol": 0.6,
+   "rel": false,
+   "unit": "GHz",
+   "ok": true
+  },
+  {
+   "what": "tune 0 V: passband centre",
+   "sim": 10050000000.0,
+   "ref": 10000000000.0,
+   "err": 50000000.0,
+   "tol": 60000000.0,
+   "rel": false,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "what": "tune 0 V: RF response 1-20 GHz, max |H - closed form| / |H|max",
+   "sim": 7.01286761482293e-05,
+   "ref": 0.0,
+   "err": 7.01286761482293e-05,
+   "tol": 0.0002,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "tune 0 V: -3 dB bandwidth = ring linewidth nu/Q_L",
+   "sim": 950000000.0,
+   "ref": 967050000.0,
+   "err": 17050000.0,
+   "tol": 110000000.0,
+   "rel": false,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "what": "tune 5 V: passband centre",
+   "sim": 15000000000.0,
+   "ref": 15000000000.0,
+   "err": 0.0,
+   "tol": 60000000.0,
+   "rel": false,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "what": "tune 5 V: RF response 1-20 GHz, max |H - closed form| / |H|max",
+   "sim": 7.20927499776872e-05,
+   "ref": 0.0,
+   "err": 7.20927499776872e-05,
+   "tol": 0.0002,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "tune 5 V: -3 dB bandwidth = ring linewidth nu/Q_L",
+   "sim": 900000000.0,
+   "ref": 967050000.0,
+   "err": 67050000.0,
+   "tol": 110000000.0,
+   "rel": false,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "note": "peak response 6.2791e-04 A/V; a phase modulator alone gives 6.1e-20 A/V"
+  },
+  {
+   "what": "transient at 10 GHz (0.05 V drive) vs AC: |i|/V",
+   "sim": 0.0006274541571564188,
+   "ref": 0.0006274019943496126,
+   "err": 8.31409642875875e-05,
+   "tol": 0.003,
+   "rel": true,
+   "unit": "A/V",
+   "ok": true
+  },
+  {
+   "what": "transient vs AC: phase",
+   "sim": -0.38978329266329986,
+   "ref": 0.0,
+   "err": 0.38978329266329986,
+   "tol": 0.5,
+   "rel": false,
+   "unit": "deg",
+   "ok": true
+  },
+  {
+   "note": "transient: 6002 points, 0.5 s"
+  }
+ ]
+}

@@ -1,0 +1,26 @@
+// t09_chain_12 -- golden reference for t09: 25 km of fibre as 12 all-pass ring sections (fit_dispersion.py)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=4 nu0=193.4
+Vrf (rf 0) vsource dc=0 mag=1
+Vb (vb 0) vsource dc=2
+X2 (a_re a_im b_re b_im xx_re xx_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+XR0 (b_re b_im r0_re r0_im dr0_re dr0_im nu 0) mwp_ring nu_res=193.382138185514 q1=1.553320793e+04
+XR1 (r0_re r0_im r1_re r1_im dr1_re dr1_im nu 0) mwp_ring nu_res=193.379288448487 q1=2.475783785e+04
+XR2 (r1_re r1_im r2_re r2_im dr2_re dr2_im nu 0) mwp_ring nu_res=193.385069026341 q1=1.238059159e+04
+XR3 (r2_re r2_im r3_re r3_im dr3_re dr3_im nu 0) mwp_ring nu_res=193.388206325190 q1=1.069637514e+04
+XR4 (r3_re r3_im r4_re r4_im dr4_re dr4_im nu 0) mwp_ring nu_res=193.391592376151 q1=9.599742469e+03
+XR5 (r4_re r4_im r5_re r5_im dr5_re dr5_im nu 0) mwp_ring nu_res=193.395253079625 q1=8.800389196e+03
+XR6 (r5_re r5_im r6_re r6_im dr6_re dr6_im nu 0) mwp_ring nu_res=193.399220557963 q1=8.182112146e+03
+XR7 (r6_re r6_im r7_re r7_im dr7_re dr7_im nu 0) mwp_ring nu_res=193.403554151667 q1=7.702758985e+03
+XR8 (r7_re r7_im r8_re r8_im dr8_re dr8_im nu 0) mwp_ring nu_res=193.408384777928 q1=7.370687155e+03
+XR9 (r8_re r8_im r9_re r9_im dr9_re dr9_im nu 0) mwp_ring nu_res=193.414054583184 q1=7.270149412e+03
+XR10 (r9_re r9_im r10_re r10_im dr10_re dr10_im nu 0) mwp_ring nu_res=193.421822225789 q1=7.778278756e+03
+XR11 (r10_re r10_im c_re c_im dr11_re dr11_im nu 0) mwp_ring nu_res=193.422152638965 q1=5.987269854e+06
+Vk (k 0) vsource dc=3
+X3 (c_re c_im an k) mwp_pd resp=0.8
+Vs (an 0) vsource dc=0
+save Vs:p
+ac1 ac start=0.1e9 stop=25.1e9 lin=250

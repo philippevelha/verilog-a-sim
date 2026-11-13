@@ -1,0 +1,20 @@
+// multiphysics__breaker_interrupt -- Spectre translation of circuits/multiphysics/breaker_interrupt.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/breaker/breaker.va"
+
+VS1 (s1 0) vsource dc=0 type=sine sinedc=0 ampl=10000 freq=50
+L1 (s1 p1) inductor l=0.0318
+C1 (p1 0) capacitor c=1e-08
+VS2 (s2 0) vsource dc=0 type=sine sinedc=0 ampl=10000 freq=50
+L2 (s2 p2) inductor l=0.0318
+C2 (p2 0) capacitor c=1e-08
+VT (trav 0) vsource dc=-0.001 type=pwl wave=[ \
+    0 -0.001 0.003 -0.001 0.007 0.02 ]
+X1 (p1 0 trav) breaker k_blast=10000000 ap=0.002
+X2 (p2 0 trav) breaker k_blast=0 ap=0.002
+
+save p1 p2
+tr tran stop=0.025 step=2e-05

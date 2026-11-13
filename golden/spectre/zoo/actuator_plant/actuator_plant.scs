@@ -1,0 +1,15 @@
+// actuator_plant -- Spectre translation of circuits/actuator_plant.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/vsin.va"
+ahdl_include "models/actuator_plant.va"
+ahdl_include "models/actuator.va"
+ahdl_include "models/spring_load.va"
+
+X0 (in 0) vsin ampl=60 freq=15.9155
+X1 (shaft in 0) actuator_plant
+
+opts2 options save=lvlpub nestlvl=1
+tr tran stop=0.2 step=0.0002

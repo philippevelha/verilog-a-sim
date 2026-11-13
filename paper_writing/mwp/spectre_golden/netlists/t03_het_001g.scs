@@ -1,0 +1,13 @@
+// t03_het_001g -- golden reference for t03 (a): two lasers 1 GHz apart on one photodiode (strobe T/64)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu1) mwp_laser p_mw=1
+X2 (b_re b_im nu2) mwp_laser p_mw=2 df=1000000000
+X3 (a_re a_im b_re b_im c_re c_im d_re d_im) mwp_coupler
+Vk (k 0) vsource dc=3
+X4 (c_re c_im an k) mwp_pd resp=0.8
+Vs (an 0) vsource dc=0
+save Vs:p
+tr tran stop=2e-08 maxstep=1.5625e-11 strobeperiod=1.5625e-11

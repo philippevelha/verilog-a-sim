@@ -1,0 +1,20 @@
+// 22 -- opto-electronic oscillator, start-up by a kick: frequency 9.9695 GHz, amplitude 2.705 V at the modulator (t04)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+X1 (a_re a_im nu) mwp_laser p_mw=10.0 rin=3.1622776601683794e-16
+Vb (vb 0) vsource dc=2
+X2 (a_re a_im b_re b_im bb_re bb_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+X3 (b_re b_im c_re c_im) mwp_delay td=5.02e-09
+Vk (k 0) vsource dc=3
+X4 (c_re c_im an k) mwp_pd resp=0.8
+RL (an 0) resistor r=50.0
+G1 (rf 0 an 0) vccs gm=0.25
+Rt (rf 0) resistor r=50.0 isnoisy=no
+Lt (rf 0) inductor l=1.591549431e-11
+Ct (rf 0) capacitor c=1.591549431e-11
+Ik (0 rf) isource type=pulse val0=0 val1=1e-3 delay=0 rise=10e-12 fall=10e-12 width=50e-12 period=1
+save rf
+tr tran stop=200e-9 maxstep=1e-12

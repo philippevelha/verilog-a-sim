@@ -1,0 +1,25 @@
+// mwp_coupler -- 2x2 directional coupler / MMI (also a 1x2 splitter: ground the b input).
+//
+//   [c]   sqrt(il) [  t   j k ] [a]        k = sqrt(kappa), t = sqrt(1 - kappa)
+//   [d] =          [ j k   t  ] [b]
+//
+// Limitations: wavelength-independent, no reflections, both inputs on the same carrier tag.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_coupler(a_re, a_im, b_re, b_im, c_re, c_im, d_re, d_im);
+    input a_re, a_im, b_re, b_im;
+    output c_re, c_im, d_re, d_im;
+    electrical a_re, a_im, b_re, b_im, c_re, c_im, d_re, d_im;
+    parameter real kappa = 0.5 from [0:1];             // power cross-coupling
+    parameter real il_db = 0.0 from [0:inf);           // excess loss, dB
+    real t, k, g;
+    analog begin
+        g = pow(10.0, -il_db / 20.0);
+        t = g * sqrt(1.0 - kappa);
+        k = g * sqrt(kappa);
+        V(c_re) <+ t * V(a_re) - k * V(b_im);
+        V(c_im) <+ t * V(a_im) + k * V(b_re);
+        V(d_re) <+ t * V(b_re) - k * V(a_im);
+        V(d_im) <+ t * V(b_im) + k * V(a_re);
+    end
+endmodule

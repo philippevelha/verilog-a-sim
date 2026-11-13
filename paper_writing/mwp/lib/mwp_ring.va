@@ -1,0 +1,46 @@
+// mwp_ring -- microring resonator (add-drop or all-pass), temporal coupled-mode theory.
+//
+//   da/dt = ( j*D - 1/tau ) a - j*mu1*s_in        D = 2*pi*(nu_res - nu_tag) + 2*pi*kf*V(tune)
+//   s_thru = s_in - j*mu1*a,   s_drop = -j*mu2*a  1/tau = 1/tau_i + 1/tau_1 + 1/tau_2
+//   tau_x = 2*Q_x / (2*pi*nu_res),  mu_x^2 = 2/tau_x
+//
+// One resonance; an envelope tone at offset f from the tag is on resonance when
+// nu_tag + f = nu_res + kf*V(tune). q2 = 0 removes the drop bus (all-pass: unit magnitude when
+// qi = 0, group delay 2*tau/(1 + (D'*tau)^2) with D' the detuning of the tone).
+// The state is y = mu1*a (in sqrt(mW)), two internal nodes.
+// Limitations: single mode (no FSR periodicity: valid within a fraction of the FSR of the
+// resonance), no backscattering, linear (no TPA / free carriers / self-heating -- for those see
+// the mrm_tcmt package), tuning is instantaneous in V(tune).
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_ring(i_re, i_im, t_re, t_im, d_re, d_im, nu, tune);
+    input i_re, i_im, nu, tune;
+    output t_re, t_im, d_re, d_im;
+    electrical i_re, i_im, t_re, t_im, d_re, d_im, nu, tune;
+    electrical yr, yi;
+    parameter real nu_res = 193.4 from (0:inf);        // resonance frequency, THz
+    parameter real q1     = 2.0e4 from (0:inf);        // coupling Q of the input bus
+    parameter real q2     = 0.0   from [0:inf);        // coupling Q of the drop bus (0: none)
+    parameter real qi     = 0.0   from [0:inf);        // intrinsic Q (0: lossless)
+    parameter real kf     = 0.0;                       // tuning, Hz per volt on `tune`
+    real w0, r1, r2, ri, tau, dt, k1, rho;
+    analog begin
+        w0  = `MWP_TWOPI * nu_res * 1e12;
+        r1  = w0 / (2.0 * q1);
+        r2  = (q2 > 0.0) ? w0 / (2.0 * q2) : 0.0;
+        ri  = (qi > 0.0) ? w0 / (2.0 * qi) : 0.0;
+        tau = 1.0 / (r1 + r2 + ri);
+        dt  = `MWP_TWOPI * ((nu_res - V(nu)) * 1e12 + kf * V(tune)) * tau;
+        k1  = 2.0 * r1 * tau;
+        rho = sqrt(r2 / r1);
+        // tau*dy/dt = (j*D*tau - 1) y - j*k1*s
+        I(yr) <+ ddt(tau * V(yr));
+        I(yr) <+ V(yr) + dt * V(yi) - k1 * V(i_im);
+        I(yi) <+ ddt(tau * V(yi));
+        I(yi) <+ V(yi) - dt * V(yr) + k1 * V(i_re);
+        V(t_re) <+ V(i_re) + V(yi);
+        V(t_im) <+ V(i_im) - V(yr);
+        V(d_re) <+ rho * V(yi);
+        V(d_im) <+ -rho * V(yr);
+    end
+endmodule

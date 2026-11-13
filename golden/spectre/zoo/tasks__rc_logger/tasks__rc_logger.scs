@@ -1,0 +1,14 @@
+// tasks__rc_logger -- Spectre translation of circuits/tasks/rc_logger.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/tasks/rc_logger.va"
+
+V1 (in 0) vsource dc=1
+R1 (in out) resistor r=1000
+C1 (out 0) capacitor c=1e-06
+X1 (out) rc_logger
+
+save out
+tr tran stop=0.003 step=0.0001 skipdc=yes

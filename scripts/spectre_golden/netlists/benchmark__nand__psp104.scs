@@ -1,0 +1,21 @@
+// benchmark__nand__psp104 -- Spectre translation of circuits/benchmark/nand/psp104.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "benchmark/models/psp104/psp104.va"
+
+VDD (vdd 0) vsource dc=1.2
+VA (a 0) vsource dc=0
+VB (b 0) vsource dc=1.2
+model XM1_model PSP104VA TYPE=1
+XM1 (out a n001 0) XM1_model
+model XM2_model PSP104VA TYPE=1
+XM2 (n001 b 0 0) XM2_model
+model XM3_model PSP104VA TYPE=-1
+XM3 (vdd b out vdd) XM3_model
+model XM4_model PSP104VA TYPE=-1
+XM4 (vdd a out vdd) XM4_model
+
+save out
+sw dc dev=VA param=dc start=0 stop=1.2 step=0.012

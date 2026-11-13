@@ -1,0 +1,157 @@
+// t11_ladder_lib -- golden reference for t11 (b): 50-section RC ladder, 1 us, the library's mwp_noise: equipartition (strobe 25 ps)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+R0 (0 n0) resistor r=1000 isnoisy=no
+C0 (n0 0) capacitor c=1e-12
+XN0 (0 n0) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=1
+R1 (n0 n1) resistor r=1000 isnoisy=no
+C1 (n1 0) capacitor c=1e-12
+XN1 (n0 n1) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=2
+R2 (n1 n2) resistor r=1000 isnoisy=no
+C2 (n2 0) capacitor c=1e-12
+XN2 (n1 n2) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=3
+R3 (n2 n3) resistor r=1000 isnoisy=no
+C3 (n3 0) capacitor c=1e-12
+XN3 (n2 n3) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=4
+R4 (n3 n4) resistor r=1000 isnoisy=no
+C4 (n4 0) capacitor c=1e-12
+XN4 (n3 n4) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=5
+R5 (n4 n5) resistor r=1000 isnoisy=no
+C5 (n5 0) capacitor c=1e-12
+XN5 (n4 n5) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=6
+R6 (n5 n6) resistor r=1000 isnoisy=no
+C6 (n6 0) capacitor c=1e-12
+XN6 (n5 n6) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=7
+R7 (n6 n7) resistor r=1000 isnoisy=no
+C7 (n7 0) capacitor c=1e-12
+XN7 (n6 n7) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=8
+R8 (n7 n8) resistor r=1000 isnoisy=no
+C8 (n8 0) capacitor c=1e-12
+XN8 (n7 n8) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=9
+R9 (n8 n9) resistor r=1000 isnoisy=no
+C9 (n9 0) capacitor c=1e-12
+XN9 (n8 n9) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=10
+R10 (n9 n10) resistor r=1000 isnoisy=no
+C10 (n10 0) capacitor c=1e-12
+XN10 (n9 n10) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=11
+R11 (n10 n11) resistor r=1000 isnoisy=no
+C11 (n11 0) capacitor c=1e-12
+XN11 (n10 n11) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=12
+R12 (n11 n12) resistor r=1000 isnoisy=no
+C12 (n12 0) capacitor c=1e-12
+XN12 (n11 n12) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=13
+R13 (n12 n13) resistor r=1000 isnoisy=no
+C13 (n13 0) capacitor c=1e-12
+XN13 (n12 n13) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=14
+R14 (n13 n14) resistor r=1000 isnoisy=no
+C14 (n14 0) capacitor c=1e-12
+XN14 (n13 n14) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=15
+R15 (n14 n15) resistor r=1000 isnoisy=no
+C15 (n15 0) capacitor c=1e-12
+XN15 (n14 n15) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=16
+R16 (n15 n16) resistor r=1000 isnoisy=no
+C16 (n16 0) capacitor c=1e-12
+XN16 (n15 n16) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=17
+R17 (n16 n17) resistor r=1000 isnoisy=no
+C17 (n17 0) capacitor c=1e-12
+XN17 (n16 n17) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=18
+R18 (n17 n18) resistor r=1000 isnoisy=no
+C18 (n18 0) capacitor c=1e-12
+XN18 (n17 n18) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=19
+R19 (n18 n19) resistor r=1000 isnoisy=no
+C19 (n19 0) capacitor c=1e-12
+XN19 (n18 n19) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=20
+R20 (n19 n20) resistor r=1000 isnoisy=no
+C20 (n20 0) capacitor c=1e-12
+XN20 (n19 n20) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=21
+R21 (n20 n21) resistor r=1000 isnoisy=no
+C21 (n21 0) capacitor c=1e-12
+XN21 (n20 n21) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=22
+R22 (n21 n22) resistor r=1000 isnoisy=no
+C22 (n22 0) capacitor c=1e-12
+XN22 (n21 n22) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=23
+R23 (n22 n23) resistor r=1000 isnoisy=no
+C23 (n23 0) capacitor c=1e-12
+XN23 (n22 n23) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=24
+R24 (n23 n24) resistor r=1000 isnoisy=no
+C24 (n24 0) capacitor c=1e-12
+XN24 (n23 n24) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=25
+R25 (n24 n25) resistor r=1000 isnoisy=no
+C25 (n25 0) capacitor c=1e-12
+XN25 (n24 n25) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=26
+R26 (n25 n26) resistor r=1000 isnoisy=no
+C26 (n26 0) capacitor c=1e-12
+XN26 (n25 n26) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=27
+R27 (n26 n27) resistor r=1000 isnoisy=no
+C27 (n27 0) capacitor c=1e-12
+XN27 (n26 n27) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=28
+R28 (n27 n28) resistor r=1000 isnoisy=no
+C28 (n28 0) capacitor c=1e-12
+XN28 (n27 n28) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=29
+R29 (n28 n29) resistor r=1000 isnoisy=no
+C29 (n29 0) capacitor c=1e-12
+XN29 (n28 n29) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=30
+R30 (n29 n30) resistor r=1000 isnoisy=no
+C30 (n30 0) capacitor c=1e-12
+XN30 (n29 n30) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=31
+R31 (n30 n31) resistor r=1000 isnoisy=no
+C31 (n31 0) capacitor c=1e-12
+XN31 (n30 n31) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=32
+R32 (n31 n32) resistor r=1000 isnoisy=no
+C32 (n32 0) capacitor c=1e-12
+XN32 (n31 n32) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=33
+R33 (n32 n33) resistor r=1000 isnoisy=no
+C33 (n33 0) capacitor c=1e-12
+XN33 (n32 n33) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=34
+R34 (n33 n34) resistor r=1000 isnoisy=no
+C34 (n34 0) capacitor c=1e-12
+XN34 (n33 n34) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=35
+R35 (n34 n35) resistor r=1000 isnoisy=no
+C35 (n35 0) capacitor c=1e-12
+XN35 (n34 n35) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=36
+R36 (n35 n36) resistor r=1000 isnoisy=no
+C36 (n36 0) capacitor c=1e-12
+XN36 (n35 n36) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=37
+R37 (n36 n37) resistor r=1000 isnoisy=no
+C37 (n37 0) capacitor c=1e-12
+XN37 (n36 n37) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=38
+R38 (n37 n38) resistor r=1000 isnoisy=no
+C38 (n38 0) capacitor c=1e-12
+XN38 (n37 n38) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=39
+R39 (n38 n39) resistor r=1000 isnoisy=no
+C39 (n39 0) capacitor c=1e-12
+XN39 (n38 n39) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=40
+R40 (n39 n40) resistor r=1000 isnoisy=no
+C40 (n40 0) capacitor c=1e-12
+XN40 (n39 n40) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=41
+R41 (n40 n41) resistor r=1000 isnoisy=no
+C41 (n41 0) capacitor c=1e-12
+XN41 (n40 n41) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=42
+R42 (n41 n42) resistor r=1000 isnoisy=no
+C42 (n42 0) capacitor c=1e-12
+XN42 (n41 n42) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=43
+R43 (n42 n43) resistor r=1000 isnoisy=no
+C43 (n43 0) capacitor c=1e-12
+XN43 (n42 n43) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=44
+R44 (n43 n44) resistor r=1000 isnoisy=no
+C44 (n44 0) capacitor c=1e-12
+XN44 (n43 n44) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=45
+R45 (n44 n45) resistor r=1000 isnoisy=no
+C45 (n45 0) capacitor c=1e-12
+XN45 (n44 n45) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=46
+R46 (n45 n46) resistor r=1000 isnoisy=no
+C46 (n46 0) capacitor c=1e-12
+XN46 (n45 n46) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=47
+R47 (n46 n47) resistor r=1000 isnoisy=no
+C47 (n47 0) capacitor c=1e-12
+XN47 (n46 n47) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=48
+R48 (n47 n48) resistor r=1000 isnoisy=no
+C48 (n48 0) capacitor c=1e-12
+XN48 (n47 n48) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=49
+R49 (n48 n49) resistor r=1000 isnoisy=no
+C49 (n49 0) capacitor c=1e-12
+XN49 (n48 n49) mwp_noise psd=1.657607189e-23 fmax=20e9 seed0=50
+save n49
+tr tran stop=1e-06 maxstep=25e-12 strobeperiod=25e-12

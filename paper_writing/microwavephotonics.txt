@@ -1,0 +1,60 @@
+An Open-Source Electronic-Photonic Co-Design Flow for Microwave Photonics Based on Verilog-A Envelope Models
+
+1. Introduction
+
+Gap: RF flows can’t represent optical carriers; photonic simulators are proprietary and weak on RF metrics.
+Contributions: (i) envelope-based Verilog-A library, (ii) open toolchain, (iii) validation against analytic, published, and commercial references, (iv) co-design case studies.
+
+2. Background and related work
+
+MWP links and metrics (gain, NF, SFDR, IIP3)
+Photonic compact modelling and PDK Verilog-A efforts
+Open simulators: verilog-a-sim (our)
+Position: what is MWP-specific versus generic photonic compact modelling
+
+3. Modelling formalism
+
+Envelope + carrier-tag representation, optical discipline, port conventions
+WDM channel handling and polarization scope (explicitly bounded)
+Dispersion via rational approximation (vector fitting), with the bandwidth limit quantified
+Noise: shot, RIN, thermal, ASE; field vs. intensity noise
+Validity region: where the envelope approximation breaks down
+
+4. Component library
+
+Sources: laser (RIN, linewidth)
+Modulators: MZM, PM, IQ
+Passives: ring/racetrack, coupler/MMI, delay line, fibre
+Detectors: PD, balanced PD, with saturation and bandwidth
+Optional: SOA
+Parameter extraction and calibration from measured data
+
+5. Toolchain architecture
+
+Netlist flow: electrical driver, photonic circuit, and receiver in one schematic/netlist
+Simulator backends and portability (Verilog-A compliance across ngspice/OpenVAF, Xyce, yours)
+Analyses: DC, transient, harmonic balance/AC, noise; where each backend is limited
+Automation: Python layer for sweeps, metric extraction (SFDR, NF), and regression tests
+Reproducibility: containerised flow, CI, Apache licence
+
+6. Validation
+
+Analytic: MZM at quadrature (gain, IP3), ring transfer function, IMDD link closed forms
+Cross-simulator consistency (same netlist, different backends)
+Published measurements and/or commercial tool comparison
+Convergence, runtime, and scaling (high-Q rings, long delays, number of tones)
+
+7. Co-design case studies
+
+IMDD link with driver and TIA: bias and Vπ trade-offs
+Ring-based MWP filter (notch/bandpass) with electronic tuning loop
+Opto-electronic oscillator: loop gain, delay, nonlinearity, phase noise
+Photonic-assisted downconverter
+
+8. Discussion
+
+Limits: dispersion bandwidth, port-count growth, stiffness
+Extensions: thermal and mechanical coupling (link to your multiphysics benchmarks), PDK integration
+
+9. Conclusion and release plan
+

@@ -1,0 +1,25 @@
+// t07_switched_110 -- golden reference for t07 (c): 3-bit switched delay line, code 110 (60 ps)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=4
+Vrf (rf 0) vsource dc=0 mag=1
+Vb (vb 0) vsource dc=2
+X2 (a_re a_im s0a_re s0a_im xx_re xx_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+Vc0 (ctl0 0) vsource dc=0
+XS0 (s0a_re s0a_im 0 0 c0_re c0_im d0_re d0_im ctl0) mwp_switch vsw=1
+XD0 (d0_re d0_im e0_re e0_im) mwp_delay td=1e-11
+Vc1 (ctl1 0) vsource dc=1
+XS1 (c0_re c0_im e0_re e0_im c1_re c1_im d1_re d1_im ctl1) mwp_switch vsw=1
+XD1 (d1_re d1_im e1_re e1_im) mwp_delay td=2e-11
+Vc2 (ctl2 0) vsource dc=0
+XS2 (c1_re c1_im e1_re e1_im c2_re c2_im d2_re d2_im ctl2) mwp_switch vsw=1
+XD2 (d2_re d2_im e2_re e2_im) mwp_delay td=4e-11
+Vc3 (ctl3 0) vsource dc=1
+XS3 (c2_re c2_im e2_re e2_im c3_re c3_im d3_re d3_im ctl3) mwp_switch vsw=1
+Vk (k 0) vsource dc=3
+X9 (c3_re c3_im an k) mwp_pd resp=0.8
+Vs (an 0) vsource dc=0
+save Vs:p
+ac1 ac start=2e9 stop=20e9 lin=36

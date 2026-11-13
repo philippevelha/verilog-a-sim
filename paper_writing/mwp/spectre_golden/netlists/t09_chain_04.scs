@@ -1,0 +1,18 @@
+// t09_chain_04 -- golden reference for t09: 25 km of fibre as 4 all-pass ring sections (fit_dispersion.py)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=4 nu0=193.4
+Vrf (rf 0) vsource dc=0 mag=1
+Vb (vb 0) vsource dc=2
+X2 (a_re a_im b_re b_im xx_re xx_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+XR0 (b_re b_im r0_re r0_im dr0_re dr0_im nu 0) mwp_ring nu_res=193.384580712974 q1=2.404020687e+04
+XR1 (r0_re r0_im r1_re r1_im dr1_re dr1_im nu 0) mwp_ring nu_res=193.391272547993 q1=1.602041852e+04
+XR2 (r1_re r1_im r2_re r2_im dr2_re dr2_im nu 0) mwp_ring nu_res=193.400540259010 q1=1.183601529e+04
+XR3 (r2_re r2_im c_re c_im dr3_re dr3_im nu 0) mwp_ring nu_res=193.434385543929 q1=8.894784606e+13
+Vk (k 0) vsource dc=3
+X3 (c_re c_im an k) mwp_pd resp=0.8
+Vs (an 0) vsource dc=0
+save Vs:p
+ac1 ac start=0.1e9 stop=25.1e9 lin=250

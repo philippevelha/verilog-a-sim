@@ -1,0 +1,12 @@
+// portprobe_dc -- Spectre translation of circuits/portprobe_dc.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/portprobe_rc.va"
+
+V1 (a 0) vsource dc=1
+M1 (a 0 out) portprobe_rc
+
+opts2 options save=lvlpub nestlvl=1
+op1 dc

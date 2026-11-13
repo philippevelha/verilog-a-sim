@@ -1,0 +1,12 @@
+// multiphysics__bubble_linear -- Spectre translation of circuits/multiphysics/bubble_linear.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/bubble/bubble_parts.va"
+
+VP (p 0) vsource dc=1 mag=1 phase=0
+XB (p) bubble
+
+save XB.y
+ac1 ac start=0.05 stop=0.3 lin=400

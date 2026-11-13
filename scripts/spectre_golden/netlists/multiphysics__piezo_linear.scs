@@ -1,0 +1,13 @@
+// multiphysics__piezo_linear -- Spectre translation of circuits/multiphysics/piezo_linear.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/piezo/piezo_parts.va"
+
+VA (acc 0) vsource dc=0 type=sine sinedc=0 ampl=2 freq=50
+X1 (acc p 0) piezo_beam
+R1 (p 0) resistor r=63662
+
+save p
+tr tran stop=3 step=2e-05

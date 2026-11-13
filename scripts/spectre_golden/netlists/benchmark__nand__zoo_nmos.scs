@@ -1,0 +1,17 @@
+// benchmark__nand__zoo_nmos -- Spectre translation of circuits/benchmark/nand/zoo_nmos.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/mosfet.va"
+
+VDD (vdd 0) vsource dc=5
+VA (a 0) vsource dc=0
+VB (b 0) vsource dc=5
+RL (vdd out) resistor r=10000
+M1 (out a n001) mosfet
+M2 (n001 b 0) mosfet
+RLK (n001 0) resistor r=1000000000
+
+save out
+sw dc dev=VA param=dc start=0 stop=5 step=0.05

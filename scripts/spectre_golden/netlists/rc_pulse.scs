@@ -1,0 +1,12 @@
+// rc_pulse -- Spectre translation of circuits/rc_pulse.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+
+V1 (in 0) vsource dc=0 type=pulse val0=0 val1=5 delay=0.0001 rise=2e-05 fall=2e-05 width=0.0004 period=0.001
+R1 (in out) resistor r=1000
+C1 (out 0) capacitor c=1e-07
+
+opts2 options save=lvlpub nestlvl=1
+tr tran stop=0.002 step=2e-06

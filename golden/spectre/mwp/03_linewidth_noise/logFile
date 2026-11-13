@@ -1,0 +1,36 @@
+HEADER
+"PSFversion" "1.00"
+"Log Generator" "drlLog rev. 1.0"
+"Log Time Stamp" "Thu Nov 12 16:35:40 2026"
+"psfversion" "1.4.0"
+"simulator" "spectre"
+"version" "24.1.0.078"
+"date" "4:35:40 PM, Thur Nov 12, 2026"
+"design" "// 03 -- laser linewidth through a delayed self-homodyne discriminator (t03 c): noise through absdelay"
+"signalNameType" "spectre"
+"simMode" "Spectre"
+"measdgt" 0
+"ingold" 2
+"sst2usecolon" 0
+TYPE
+"analysisInst" STRUCT(
+"analysisType" STRING *
+"dataFile" STRING *
+"format" STRING *
+"parent" STRING *
+"sweepVariable" ARRAY ( * ) STRING *
+"description" STRING *
+)
+VALUE
+"nz-noise" "analysisInst" (
+"noise"
+"nz.noise"
+"PSF"
+""
+("freq")
+"Noise Analysis `nz': freq = (100 kHz -> 3 GHz)"
+) PROP(
+"data_type" "swept_struct"
+)
+
+END

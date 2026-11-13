@@ -1,0 +1,20 @@
+// t06_demux -- golden reference for t06 (c): 2 GS/s samples demultiplexed 1:2 by a 1 GHz switch onto two 4 GHz detectors (strobe 25 ps)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_mll pavg_mw=1 frep=2e9 fwhm=2e-12 t0=2.5e-10
+Vrf (rf 0) vsource type=sine ampl=1.6 freq=10343750000
+Vb (vb 0) vsource dc=2
+X2 (a_re a_im b_re b_im bb_re bb_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+Vsw (sw 0) vsource type=sine sinedc=0.5 ampl=0.5 freq=1e9 sinephase=0
+X3 (b_re b_im 0 0 c_re c_im d_re d_im sw) mwp_switch vsw=1
+Vk (k 0) vsource dc=3
+X4 (c_re c_im a1 k) mwp_pd resp=0.8 f3db=4e9
+X5 (d_re d_im a2 k) mwp_pd resp=0.8 f3db=4e9
+C1 (a1 0) capacitor c=4e-13
+C2 (a2 0) capacitor c=4e-13
+R1 (a1 0) resistor r=1e13 isnoisy=no
+R2 (a2 0) resistor r=1e13 isnoisy=no
+save a1 a2
+tr tran stop=3.3e-08 strobeperiod=25e-12

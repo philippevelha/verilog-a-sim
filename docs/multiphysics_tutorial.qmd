@@ -1,6 +1,7 @@
 ---
 title: "Multiphysics with verilog-a-sim"
 subtitle: "A hands-on tutorial: every example, every command, every figure"
+author: "Philippe Velha"
 format:
   html:
     toc: true

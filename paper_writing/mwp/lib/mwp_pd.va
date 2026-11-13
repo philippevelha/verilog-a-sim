@@ -1,0 +1,37 @@
+// mwp_pd -- photodiode: responsivity, saturation, bandwidth, dark current, shot noise.
+//
+//   P    = |A|^2 (mW)                    P_eff = P / (1 + P/psat)
+//   i_ph = resp * 1e-3 * LP1{P_eff}      one pole at f3db
+//   current i_ph + idark flows cathode -> anode inside the device
+//   noise: shot, 2 q (i_ph + idark)
+//
+// Square-law detection of the envelope: every beat between spectral components inside the
+// envelope appears in the current. Light on another carrier tag goes to another mwp_pd wired
+// electrically in parallel (the powers add: no beat term, valid when the tag spacing is far
+// beyond the detector bandwidth).
+// Limitations: no junction (the current source does not clamp when the bias collapses), no
+// capacitance other than the single pole, saturation is a memoryless compression of the
+// optical power, no responsivity dispersion.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_pd(i_re, i_im, a, c);
+    input i_re, i_im;
+    inout a, c;
+    electrical i_re, i_im, a, c;
+    electrical px;                                     // band-limited detected power, mW
+    parameter real resp  = 0.8   from [0:inf);         // responsivity, A/W
+    parameter real f3db  = 0.0   from [0:inf);         // bandwidth, Hz (0: unlimited)
+    parameter real psat  = 0.0   from [0:inf);         // saturation power, mW (0: none)
+    parameter real idark = 0.0   from [0:inf);         // dark current, A
+    real p, pe, tau, iph;
+    analog begin
+        tau = (f3db > 0.0) ? 1.0 / (`MWP_TWOPI * f3db) : 0.0;
+        p   = V(i_re) * V(i_re) + V(i_im) * V(i_im);
+        pe  = (psat > 0.0) ? p / (1.0 + p / psat) : p;
+        I(px) <+ V(px) - pe;
+        I(px) <+ ddt(tau * V(px));
+        iph = resp * 1e-3 * V(px);
+        I(c, a) <+ iph + idark;
+        I(c, a) <+ white_noise(2.0 * `MWP_Q * (abs(iph) + idark), "shot");
+    end
+endmodule

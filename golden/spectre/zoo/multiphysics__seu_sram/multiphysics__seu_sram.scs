@@ -1,0 +1,31 @@
+// multiphysics__seu_sram -- Spectre translation of circuits/multiphysics/seu_sram.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/seu/seu_parts.va"
+
+VDD (vdd 0) vsource dc=1.2
+VBL (bl 0) vsource dc=1.2
+XN11 (q1 qb1 0) mos
+XP11 (q1 qb1 vdd) mos type=-1 beta=0.0002
+XN21 (qb1 q1 0) mos
+XP21 (qb1 q1 vdd) mos type=-1 beta=0.0002
+XA11 (bl 0 q1) mos beta=0.0002
+XA21 (bl 0 qb1) mos beta=0.0002
+C11 (q1 0) capacitor c=1e-15
+C21 (qb1 0) capacitor c=1e-15
+XS1 (q1 0) strike_diffusion qdep=1e-14
+XN12 (q2 qb2 0) mos
+XP12 (q2 qb2 vdd) mos type=-1 beta=0.0002
+XN22 (qb2 q2 0) mos
+XP22 (qb2 q2 vdd) mos type=-1 beta=0.0002
+XA12 (bl 0 q2) mos beta=0.0002
+XA22 (bl 0 qb2) mos beta=0.0002
+C12 (q2 0) capacitor c=1e-15
+C22 (qb2 0) capacitor c=1e-15
+XS2 (q2 0) strike_diffusion qdep=1.1e-14
+nodeset q1=1.2 qb1=0 q2=1.2 qb2=0
+
+save q1 qb1 q2 qb2
+tr tran stop=1e-08 step=1e-11

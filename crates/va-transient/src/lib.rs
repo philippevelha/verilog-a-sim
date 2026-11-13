@@ -9,6 +9,7 @@
 
 pub mod events;
 pub mod integrator;
+pub mod noise;
 
 use thiserror::Error;
 

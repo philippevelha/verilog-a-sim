@@ -1,0 +1,59 @@
+// mwp_mzm -- Mach-Zehnder intensity modulator with both outputs.
+//
+//   th  = pi * v / vpi            v = V(rf_p, rf_n) after one pole at f3db
+//   phb = pi * V(bias) / vpi_dc + phi0
+//   upper arm phase  p1 = +(1 + alpha)/2 * th + phb/2
+//   lower arm phase  p2 = -(1 - alpha)/2 * th - phb/2
+//   out = sqrt(il) * A_in * (a1 e^{j p1} + a2 e^{j p2}) / sqrt(2)
+//   bar = sqrt(il) * A_in * (a1 e^{j p1} - a2 e^{j p2}) / (j sqrt(2))
+//
+// With balanced arms (a1 = a2 = 1/sqrt 2):  P_out = il*P_in*cos^2((th+phb)/2) and
+// P_bar = il*P_in*sin^2((th+phb)/2). V(bias) = vpi_dc/2 is quadrature, vpi_dc the null of
+// `out`. alpha = 0 is a chirp-free push-pull (X-cut) device, alpha = +-1 a single-arm drive.
+// A finite extinction ratio er_db sets the arm imbalance a2/a1 = (sqrt(ER)-1)/(sqrt(ER)+1).
+// Limitations: as mwp_pm (lumped electrode, one pole); no bias drift; no photorefractive or
+// thermal effects; wavelength-independent.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_mzm(i_re, i_im, o_re, o_im, ob_re, ob_im, rf_p, rf_n, bias);
+    input i_re, i_im, bias;
+    output o_re, o_im, ob_re, ob_im;
+    inout rf_p, rf_n;
+    electrical i_re, i_im, o_re, o_im, ob_re, ob_im, rf_p, rf_n, bias;
+    electrical vx;
+    parameter real vpi    = 4.0   from (0:inf);        // RF half-wave voltage, V
+    parameter real vpi_dc = 4.0   from (0:inf);        // bias-port half-wave voltage, V
+    parameter real phi0   = 0.0;                       // built-in phase offset, rad
+    parameter real alpha  = 0.0   from [-1:1];         // drive asymmetry (chirp)
+    parameter real er_db  = 300.0 from (0:inf);        // DC extinction ratio, dB
+    parameter real il_db  = 0.0   from [0:inf);        // insertion loss, dB
+    parameter real f3db   = 0.0   from [0:inf);        // electro-optic bandwidth, Hz (0: unlimited)
+    parameter real rterm  = 50.0  from [0:inf);        // RF termination, ohm (0: open)
+    real th, phb, p1, p2, g, tau, gam, a1, a2, ur, ui, wr, wi;
+    analog begin
+        tau = (f3db > 0.0) ? 1.0 / (`MWP_TWOPI * f3db) : 0.0;
+        I(vx) <+ V(vx) - V(rf_p, rf_n);
+        I(vx) <+ ddt(tau * V(vx));
+        if (rterm > 0.0) begin
+            I(rf_p, rf_n) <+ V(rf_p, rf_n) / rterm;
+            I(rf_p, rf_n) <+ white_noise(4.0 * `MWP_KB * $temperature / rterm, "rterm");
+        end
+        th  = `MWP_PI * V(vx) / vpi;
+        phb = `MWP_PI * V(bias) / vpi_dc + phi0;
+        p1  =  0.5 * (1.0 + alpha) * th + 0.5 * phb;
+        p2  = -0.5 * (1.0 - alpha) * th - 0.5 * phb;
+        gam = (pow(10.0, er_db / 20.0) - 1.0) / (pow(10.0, er_db / 20.0) + 1.0);
+        a1  = 1.0 / sqrt(1.0 + gam * gam);
+        a2  = gam * a1;
+        g   = pow(10.0, -il_db / 20.0) / sqrt(2.0);
+        // the two arm fields
+        ur = a1 * (V(i_re) * cos(p1) - V(i_im) * sin(p1));
+        ui = a1 * (V(i_re) * sin(p1) + V(i_im) * cos(p1));
+        wr = a2 * (V(i_re) * cos(p2) - V(i_im) * sin(p2));
+        wi = a2 * (V(i_re) * sin(p2) + V(i_im) * cos(p2));
+        V(o_re)  <+ g * (ur + wr);
+        V(o_im)  <+ g * (ui + wi);
+        V(ob_re) <+ g * (ui - wi);                     // (d_r + j d_i)/j = d_i - j d_r
+        V(ob_im) <+ -g * (ur - wr);
+    end
+endmodule

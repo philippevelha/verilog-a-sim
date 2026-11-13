@@ -1,0 +1,211 @@
+HEADER
+"PSFversion" "1.00"
+"simulator" "spectre"
+"version" "24.1.0.078"
+"date" "4:35:04 PM, Thur Nov 12, 2026"
+"design" "// 01 -- IMDD link, output noise: shot + RIN + load thermal (t01 d)"
+"analysis type" "noise"
+"analysis name" "nz"
+"analysis description" "Noise Analysis `nz': freq = (100 MHz -> 10 GHz)"
+"xVecSorted" "ascending"
+"tolerance.relative" 1.000000000000000e-06
+"operating point producer" "nz"
+"output" "pair of nodes"
+"ground" "0"
+"positive output signal" "an"
+"negative output signal" "0"
+"input probe" "Vrf"
+TYPE
+"sweep" FLOAT DOUBLE PROP(
+"key" "sweep"
+)
+"V/sqrt(Hz)" FLOAT DOUBLE PROP(
+"units" "V/sqrt(Hz)"
+"key" "noise"
+)
+"V^2/Hz" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+"key" "noise"
+)
+"V/V" FLOAT DOUBLE PROP(
+"units" "V/V"
+"key" "noise"
+)
+"Noise factor" FLOAT DOUBLE PROP(
+"units" "(V^2/Hz)/(V^2/Hz)"
+"key" "noise"
+)
+"dB" FLOAT DOUBLE PROP(
+"units" "dB"
+"key" "noise"
+)
+"mwp_laser" STRUCT(
+"linewidth" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+)
+"rin" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+)
+"total" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+)
+) PROP(
+"key" "inst"
+"master" "mwp_laser"
+)
+"mwp_mzm" STRUCT(
+"rterm" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+)
+"total" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+)
+) PROP(
+"key" "inst"
+"master" "mwp_mzm"
+)
+"mwp_pd" STRUCT(
+"shot" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+)
+"total" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+)
+) PROP(
+"key" "inst"
+"master" "mwp_pd"
+)
+"resistor" STRUCT(
+"rn" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+"noise_type" "thermal"
+)
+"total" FLOAT DOUBLE PROP(
+"units" "V^2/Hz"
+)
+) PROP(
+"key" "inst"
+"master" "resistor"
+)
+SWEEP
+"freq" "sweep" PROP(
+"sweep_direction" 0
+"units" "Hz"
+"plot" 0
+"grid" 3
+)
+TRACE
+"X1" "mwp_laser"
+"X2" "mwp_mzm"
+"X3" "mwp_pd"
+"RL" "resistor"
+"out" "V/sqrt(Hz)"
+"in" "V/sqrt(Hz)"
+"gain" "V/V"
+VALUE
+"freq" 1.000000000000000e+08
+"X1" (
+0.000000000000000e+00
+1.264911064067352e-17
+1.264911064067352e-17
+)
+"X2" (
+0.000000000000000e+00
+0.000000000000000e+00
+)
+"X3" (
+3.204353268000001e-18
+3.204353268000001e-18
+)
+"RL" (
+8.287877467800001e-19
+8.287877467800001e-19
+)
+"out" 4.084391222135010e-09
+"in" 2.600204210095737e-08
+"gain" 1.570796326794897e-01
+"freq" 3.162277660168380e+08
+"X1" (
+0.000000000000000e+00
+1.264911064067352e-17
+1.264911064067352e-17
+)
+"X2" (
+0.000000000000000e+00
+0.000000000000000e+00
+)
+"X3" (
+3.204353268000001e-18
+3.204353268000001e-18
+)
+"RL" (
+8.287877467800001e-19
+8.287877467800001e-19
+)
+"out" 4.084391222135010e-09
+"in" 2.600204210095737e-08
+"gain" 1.570796326794897e-01
+"freq" 1.000000000000000e+09
+"X1" (
+0.000000000000000e+00
+1.264911064067352e-17
+1.264911064067352e-17
+)
+"X2" (
+0.000000000000000e+00
+0.000000000000000e+00
+)
+"X3" (
+3.204353268000001e-18
+3.204353268000001e-18
+)
+"RL" (
+8.287877467800001e-19
+8.287877467800001e-19
+)
+"out" 4.084391222135010e-09
+"in" 2.600204210095737e-08
+"gain" 1.570796326794897e-01
+"freq" 3.162277660168380e+09
+"X1" (
+0.000000000000000e+00
+1.264911064067352e-17
+1.264911064067352e-17
+)
+"X2" (
+0.000000000000000e+00
+0.000000000000000e+00
+)
+"X3" (
+3.204353268000001e-18
+3.204353268000001e-18
+)
+"RL" (
+8.287877467800001e-19
+8.287877467800001e-19
+)
+"out" 4.084391222135010e-09
+"in" 2.600204210095737e-08
+"gain" 1.570796326794897e-01
+"freq" 1.000000000000000e+10
+"X1" (
+0.000000000000000e+00
+1.264911064067352e-17
+1.264911064067352e-17
+)
+"X2" (
+0.000000000000000e+00
+0.000000000000000e+00
+)
+"X3" (
+3.204353268000001e-18
+3.204353268000001e-18
+)
+"RL" (
+8.287877467800001e-19
+8.287877467800001e-19
+)
+"out" 4.084391222135010e-09
+"in" 2.600204210095737e-08
+"gain" 1.570796326794897e-01
+END

@@ -1,0 +1,13 @@
+// t03_linewidth_noise -- golden reference for t03 (c): laser linewidth through a delayed self-homodyne discriminator
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=4 lw=1e5 rin=1e-14
+X2 (a_re a_im 0 0 c_re c_im d_re d_im) mwp_coupler
+X3 (d_re d_im e_re e_im) mwp_delay td=1e-9 phi=1.5707963267948966
+X4 (c_re c_im e_re e_im p_re p_im n_re n_im) mwp_coupler
+X5 (p_re p_im n_re n_im out 0) mwp_bpd resp=0.8
+RL (out 0) resistor r=50
+save out
+nz (out 0) noise start=1e5 stop=3e9 dec=20

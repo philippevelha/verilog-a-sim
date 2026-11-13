@@ -1,0 +1,10 @@
+# Raw Spectre run output stays local (author's decision, 2026-11-13): the logs name the user,
+# the server and the licence server, and record Spectre's own timings and memory, which may
+# not be publishable under the Cadence licence agreement (being checked). The result files
+# (PSF), their logFile indexes and the netlists are the golden data and are committed.
+spectre.log
+summary*.txt
+environment*.txt
+ahdlcmi*.out
+# verilog-a-sim against Spectre, time and memory: local until the agreement is checked
+*.local.md

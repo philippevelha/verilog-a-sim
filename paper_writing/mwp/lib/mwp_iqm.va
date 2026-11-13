@@ -1,0 +1,38 @@
+// mwp_iqm -- optical IQ modulator (dual-parallel MZM): two push-pull MZMs nested in an
+// interferometer with a phase shifter.
+//
+//   t_I = cos( pi*(vi + V(bi)) / (2 vpi) ),   t_Q = cos( pi*(vq + V(bq)) / (2 vpi) )
+//   A_out = sqrt(il) * A_in * ( t_I + exp(j*pi*V(bp)/vpi) * t_Q ) / 2
+//
+// As a vector modulator: both children at null (V(bi) = V(bq) = vpi), V(bp) = vpi/2, so that
+// A_out = -(A_in/2) * ( sin(pi vi/2vpi) + j sin(pi vq/2vpi) ). With other biases it is the
+// dual-parallel MZM of carrier-suppressed mixers and RF phase shifters. vi, vq are
+// single-ended against ground and pass one pole at f3db. Limitations: ideal children
+// (infinite extinction), the RF ports are open (terminate them in the netlist).
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_iqm(i_re, i_im, o_re, o_im, vi, vq, bi, bq, bp);
+    input i_re, i_im, vi, vq, bi, bq, bp;
+    output o_re, o_im;
+    electrical i_re, i_im, o_re, o_im, vi, vq, bi, bq, bp;
+    electrical xi, xq;
+    parameter real vpi   = 4.0 from (0:inf);           // half-wave voltage of every electrode, V
+    parameter real il_db = 0.0 from [0:inf);           // insertion loss, dB
+    parameter real f3db  = 0.0 from [0:inf);           // electro-optic bandwidth, Hz (0: unlimited)
+    real tau, ti, tq, php, g, mr, mi;
+    analog begin
+        tau = (f3db > 0.0) ? 1.0 / (`MWP_TWOPI * f3db) : 0.0;
+        I(xi) <+ V(xi) - V(vi);
+        I(xi) <+ ddt(tau * V(xi));
+        I(xq) <+ V(xq) - V(vq);
+        I(xq) <+ ddt(tau * V(xq));
+        ti  = cos(0.5 * `MWP_PI * (V(xi) + V(bi)) / vpi);
+        tq  = cos(0.5 * `MWP_PI * (V(xq) + V(bq)) / vpi);
+        php = `MWP_PI * V(bp) / vpi;
+        g   = 0.5 * pow(10.0, -il_db / 20.0);
+        mr  = ti + tq * cos(php);
+        mi  = tq * sin(php);
+        V(o_re) <+ g * (V(i_re) * mr - V(i_im) * mi);
+        V(o_im) <+ g * (V(i_re) * mi + V(i_im) * mr);
+    end
+endmodule

@@ -1,0 +1,101 @@
+{
+ "test": "t09_dispersion",
+ "ok": true,
+ "wall_s": 8.34,
+ "rows": [
+  {
+   "note": "first fading null at 12.12 GHz"
+  },
+  {
+   "what": "4 sections: simulator against the chain's exact response, 0.1-25 GHz, max |dH| / S0",
+   "sim": 8.543392918452708e-05,
+   "ref": 0.0,
+   "err": 8.543392918452708e-05,
+   "tol": 0.0003,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "4 sections: group-delay fit error 7.638 ps peak over a 109 ps span; fading curve within 1.66e-02 of the ideal fibre up to 16 GHz; bulk delay 60 ps"
+  },
+  {
+   "note": "4 sections: beyond the fitted band the response departs from the fibre by more than 0.1 at 18.4 GHz"
+  },
+  {
+   "what": "8 sections: simulator against the chain's exact response, 0.1-25 GHz, max |dH| / S0",
+   "sim": 8.480451406395697e-05,
+   "ref": 0.0,
+   "err": 8.480451406395697e-05,
+   "tol": 0.0003,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "8 sections: group-delay fit error 0.022 ps peak over a 109 ps span; fading curve within 3.13e-05 of the ideal fibre up to 16 GHz; bulk delay 113 ps"
+  },
+  {
+   "what": "8 sections: |H_RF| against the fibre's cos(pi lambda^2 D L f^2/c), 0.1-16 GHz, max deviation",
+   "sim": 3.1317036025546585e-05,
+   "ref": 0.0,
+   "err": 3.1317036025546585e-05,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "8 sections: position of the first null",
+   "sim": 12100000000.0,
+   "ref": 12115369261.246252,
+   "err": 15369261.24625206,
+   "tol": 60000000.0,
+   "rel": false,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "note": "8 sections: beyond the fitted band the response departs from the fibre by more than 0.1 at 19.9 GHz"
+  },
+  {
+   "what": "12 sections: simulator against the chain's exact response, 0.1-25 GHz, max |dH| / S0",
+   "sim": 8.603271042319868e-05,
+   "ref": 0.0,
+   "err": 8.603271042319868e-05,
+   "tol": 0.0003,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "12 sections: group-delay fit error 0.000 ps peak over a 109 ps span; fading curve within 3.91e-07 of the ideal fibre up to 16 GHz; bulk delay 158 ps"
+  },
+  {
+   "what": "12 sections: |H_RF| against the fibre's cos(pi lambda^2 D L f^2/c), 0.1-16 GHz, max deviation",
+   "sim": 3.9119259476194657e-07,
+   "ref": 0.0,
+   "err": 3.9119259476194657e-07,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "12 sections: position of the first null",
+   "sim": 12100000000.0,
+   "ref": 12115369261.246252,
+   "err": 15369261.24625206,
+   "tol": 60000000.0,
+   "rel": false,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "note": "12 sections: beyond the fitted band the response departs from the fibre by more than 0.1 at 21.4 GHz"
+  },
+  {
+   "note": "cost: 12 sections = 24 extra unknowns; AC 251 points in 0.13 s"
+  }
+ ]
+}

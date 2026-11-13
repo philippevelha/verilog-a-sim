@@ -1,0 +1,15 @@
+// t02_filter_ac_0v -- golden reference for t02 (b): single-passband filter, tuning 0 V (381 points 1-20 GHz)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=1 nu0=193.4
+Vrf (rf 0) vsource dc=0 mag=1
+X2 (a_re a_im b_re b_im rf 0) mwp_pm vpi=4 rterm=0
+Vt (tune 0) vsource dc=0
+X3 (b_re b_im t_re t_im d_re d_im nu tune) mwp_ring nu_res=193.41 q1=4e5 qi=4e5 kf=1e9
+Vk (k 0) vsource dc=3
+X4 (t_re t_im an k) mwp_pd resp=0.8
+Vs (an 0) vsource dc=0
+save Vs:p
+ac1 ac start=1e9 stop=20e9 lin=380

@@ -1,0 +1,15 @@
+// multiphysics__hh_giant_axon -- Spectre translation of circuits/multiphysics/hh_giant_axon.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/axon/hh_cable.va"
+
+VP (p 0) vsource dc=0 type=pulse val0=0 val1=20 delay=0.0005 rise=1e-05 fall=1e-05 width=0.0002 period=1
+G1 (0 stim1 p 0) vccs gm=1e-06
+G2 (0 stim2 p 0) vccs gm=1e-06
+X1 (stim1) hh_cable N=150 len=0.03 a=0.000238 ri=0.354 tc=18.5 probe_a=50 probe_b=100
+X2 (stim2) hh_cable N=150 len=0.03 a=0.000238 ri=0.354 tc=6.3 probe_a=50 probe_b=100
+
+save X1.v\[0\] X1.v\[50\] X1.v\[100\] X2.v\[100\]
+tr tran stop=0.006 step=1e-05

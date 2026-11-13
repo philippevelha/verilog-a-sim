@@ -1,0 +1,26 @@
+// multiphysics__li_discharge -- Spectre translation of circuits/multiphysics/li_discharge.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/liion/li_parts.va"
+
+VA (amb 0) vsource dc=298.15
+XN1 (0 en1 th1) electrode kind=0 theta0=0.8
+XE1 (en1 ep1 th1) electrolyte
+XP1 (p1 ep1 th1) electrode kind=1 cmax=51555 vact=2.96e-06 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT1 (th1 amb) cell_thermal
+XL1 (p1 0) cc_load iset=0.1
+XN2 (0 en2 th2) electrode kind=0 theta0=0.8
+XE2 (en2 ep2 th2) electrolyte
+XP2 (p2 ep2 th2) electrode kind=1 cmax=51555 vact=2.96e-06 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT2 (th2 amb) cell_thermal
+XL2 (p2 0) cc_load iset=2
+XN3 (0 en3 th3) electrode kind=0 theta0=0.8
+XE3 (en3 ep3 th3) electrolyte
+XP3 (p3 ep3 th3) electrode kind=1 cmax=51555 vact=2.96e-06 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT3 (th3 amb) cell_thermal
+XL3 (p3 0) cc_load iset=4
+
+save p1 p2 p3 th2 th3
+tr tran stop=75000 step=10

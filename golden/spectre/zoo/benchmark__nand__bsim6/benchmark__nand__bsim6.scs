@@ -1,0 +1,17 @@
+// benchmark__nand__bsim6 -- Spectre translation of circuits/benchmark/nand/bsim6.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "benchmark/models/bsim6/bsim6.0.va"
+
+VDD (vdd 0) vsource dc=1.2
+VA (a 0) vsource dc=0
+VB (b 0) vsource dc=1.2
+XM1 (out a n001 0) bsim6 TYPE=1
+XM2 (n001 b 0 0) bsim6 TYPE=1
+XM3 (vdd b out vdd) bsim6 TYPE=-1
+XM4 (vdd a out vdd) bsim6 TYPE=-1
+
+save out
+sw dc dev=VA param=dc start=0 stop=1.2 step=0.012

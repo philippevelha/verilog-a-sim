@@ -1,0 +1,36 @@
+HEADER
+"PSFversion" "1.00"
+"Log Generator" "drlLog rev. 1.0"
+"Log Time Stamp" "Thu Nov 12 22:37:29 2026"
+"psfversion" "1.4.0"
+"simulator" "spectre"
+"version" "24.1.0.078"
+"date" "10:37:29 PM, Thur Nov 12, 2026"
+"design" "// multiphysics__bubble_cloud_response -- Spectre translation of circuits/multiphysics/bubble_cloud_response.net (scripts/spectre_golden/net2spectre.py)"
+"signalNameType" "spectre"
+"simMode" "Spectre"
+"measdgt" 0
+"ingold" 2
+"sst2usecolon" 0
+TYPE
+"analysisInst" STRUCT(
+"analysisType" STRING *
+"dataFile" STRING *
+"format" STRING *
+"parent" STRING *
+"sweepVariable" ARRAY ( * ) STRING *
+"description" STRING *
+)
+VALUE
+"ac1-ac" "analysisInst" (
+"ac"
+"ac1.ac"
+"PSF"
+""
+("freq")
+"AC Analysis `ac1': freq = (15.9155 mHz -> 159.155 mHz)"
+) PROP(
+"data_type" "swept_scalar"
+)
+
+END

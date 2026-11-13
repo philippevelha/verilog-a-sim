@@ -4,6 +4,19 @@ Reference simulator: **QSPICE** (originally ngspice; switched 2026-07-13 to matc
 dev environment) — an oracle only; we are not building on it. `va-harness` runs the pipeline
 and compares to committed `golden/` outputs.
 
+**Second reference, adopted 2026-11-12: Cadence Spectre** (SPECTRE 24.1.0.078, on the author's
+licensed Linux server), for circuits that are Verilog-A throughout and for harmonic balance and
+periodic noise, which QSPICE does not have. Outputs in `golden/spectre/` (ASCII PSF, each with
+its netlist and log); gate `paper_writing/mwp/tests/t12_spectre_golden.py`, which runs the same
+circuits here and compares (16 checks: DC, AC, noise, two-tone transient, a filter, a
+beamformer, a delay at the noise frequency, against Spectre's harmonic balance a multiplier and
+a two-tone mixer, and an oscillator's frequency and amplitude against Spectre's autonomous
+harmonic balance). Regenerated only by running `paper_writing/mwp/spectre/run.sh` on the server.
+**Not a reference for:** the phase noise of an oscillator with a delay line in its loop (13 dB
+above the formula, cause not settled; `paper_writing/mwp/spectre/README.md`); and any result
+of an autonomous harmonic balance that is not checked for the trivial solution (one deck
+converged to the non-oscillating state without an error).
+
 > **Registry of what matches a reference:** the repository-root `validation.md` lists every
 > contribution that reproduces a reference paper, textbook circuit or QSPICE result, by domain,
 > with what it was measured against. This file is the *mechanics* — metrics, tolerances, the

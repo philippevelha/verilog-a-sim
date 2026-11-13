@@ -1,0 +1,25 @@
+// mwp_delay -- true time delay of the envelope.
+//
+//   A_out(t) = sqrt(il) * exp(j*phi) * A_in(t - td)
+//
+// The delay acts on the envelope; the optical carrier's own phase -2*pi*nu*td (1e5 rad per
+// nanosecond, and in practice set by sub-wavelength length drift) is the separate parameter
+// `phi`. An RF tone on the envelope gets the phase -2*pi*f*td at every f: true time delay.
+// Uses absdelay(): exact in AC/noise, a sampled history (linear interpolation) in transient.
+// The delay is fixed for the run.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_delay(i_re, i_im, o_re, o_im);
+    input i_re, i_im;
+    output o_re, o_im;
+    electrical i_re, i_im, o_re, o_im;
+    parameter real td    = 100e-12 from [0:inf);       // delay, s
+    parameter real phi   = 0.0;                        // optical carrier phase, rad
+    parameter real il_db = 0.0     from [0:inf);       // loss, dB
+    real g;
+    analog begin
+        g = pow(10.0, -il_db / 20.0);
+        V(o_re) <+ absdelay(g * (V(i_re) * cos(phi) - V(i_im) * sin(phi)), td);
+        V(o_im) <+ absdelay(g * (V(i_re) * sin(phi) + V(i_im) * cos(phi)), td);
+    end
+endmodule

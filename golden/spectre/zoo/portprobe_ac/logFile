@@ -1,0 +1,36 @@
+HEADER
+"PSFversion" "1.00"
+"Log Generator" "drlLog rev. 1.0"
+"Log Time Stamp" "Fri Nov 13 09:56:54 2026"
+"psfversion" "1.4.0"
+"simulator" "spectre"
+"version" "24.1.0.078"
+"date" "9:56:54 AM, Fri Nov 13, 2026"
+"design" "// portprobe_ac -- Spectre translation of circuits/portprobe_ac.net (scripts/spectre_golden/net2spectre.py)"
+"signalNameType" "spectre"
+"simMode" "Spectre"
+"measdgt" 0
+"ingold" 2
+"sst2usecolon" 0
+TYPE
+"analysisInst" STRUCT(
+"analysisType" STRING *
+"dataFile" STRING *
+"format" STRING *
+"parent" STRING *
+"sweepVariable" ARRAY ( * ) STRING *
+"description" STRING *
+)
+VALUE
+"ac1-ac" "analysisInst" (
+"ac"
+"ac1.ac"
+"PSF"
+""
+("freq")
+"AC Analysis `ac1': freq = (10 Hz -> 10 MHz)"
+) PROP(
+"data_type" "swept_scalar"
+)
+
+END

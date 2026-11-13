@@ -1,0 +1,18 @@
+// multiphysics__optomech_threshold -- Spectre translation of circuits/multiphysics/optomech_threshold.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/optomech/optomech.va"
+
+VP1 (p1 0) vsource dc=1.417e-08
+VP2 (p2 0) vsource dc=2.834e-08
+VP3 (p3 0) vsource dc=5.668e-08
+VP4 (p4 0) vsource dc=5.668e-08
+X1 (p1) optomech
+X2 (p2) optomech
+X3 (p3) optomech
+X4 (p4) optomech delta0=-62831853.07
+
+save X1.x X2.x X3.x X4.x
+tr tran stop=0.0003 step=1e-09

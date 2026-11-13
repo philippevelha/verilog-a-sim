@@ -1,0 +1,70 @@
+// snn__transistor__fig5_fit -- Spectre translation of circuits/snn/transistor/fig5_fit.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/snn/vswitch.va"
+ahdl_include "models/snn/comparator.va"
+ahdl_include "models/snn/rram.va"
+ahdl_include "models/snn/mos_switch.va"
+ahdl_include "models/snn/sl_stage.va"
+ahdl_include "models/snn/neuron_logic.va"
+
+subckt dff (d q m clk qclk)
+XSm (d mc clk) vswitch vt=2.5
+Cm (mc 0) capacitor c=1e-14 ic=0
+Em (m 0 mc 0) vcvs gain=1
+XSs (m s qclk) vswitch
+Cs (s 0) capacitor c=1e-14 ic=0
+Eq (q 0 s 0) vcvs gain=1
+ends dff
+CM (vm 0) capacitor c=9.98e-13 ic=0
+XSlk (vm cl qclk) vswitch
+CL (cl 0) capacitor c=6.6e-13 ic=0
+XSdis (cl 0 clk) vswitch
+Vth (vth 0) vsource dc=2.4
+Xcmp (vm vth cmp) comparator
+Xff0 (cmp q0 m0 clk qclk) dff
+Espk (spk 0 q0 0) vcvs gain=1
+Xff1 (q0 q1 m1 clk qclk) dff
+Xff2 (q1 q2 m2 clk qclk) dff
+Xff3 (q2 q3 m3 clk qclk) dff
+Xff4 (q3 q4 m4 clk qclk) dff
+Xff5 (q4 q5 m5 clk qclk) dff
+XSrst (vm vres rs) vswitch
+XShz (vm 0 hz) vswitch
+Vvp (vp 0) vsource dc=1.75
+Vvn (vn 0) vsource dc=1.55
+Vref (vref 0) vsource dc=1.65
+Vres (vres 0) vsource dc=1
+Vclk (clk 0) vsource dc=0 type=pulse val0=0 val1=3.3 delay=1.245e-07 rise=1e-09 fall=1e-09 width=1.24e-07 period=2.5e-07
+Vqclk (qclk 0) vsource dc=0 type=pulse val0=0 val1=3.3 delay=2e-09 rise=1e-09 fall=1e-09 width=1.19e-07 period=2.5e-07
+Vpor (por 0) vsource dc=0
+Vwl1 (wl1 0) vsource dc=0 type=pulse val0=0 val1=3.3 delay=0 rise=1e-09 fall=1e-09 width=2.49e-07 period=1e-06
+Vwl2 (wl2 0) vsource dc=0 type=pulse val0=0 val1=3.3 delay=2.5e-07 rise=1e-09 fall=1e-09 width=2.49e-07 period=1e-06
+Vwl3 (wl3 0) vsource dc=0 type=pulse val0=0 val1=3.3 delay=5e-07 rise=1e-09 fall=1e-09 width=2.49e-07 period=1e-06
+Vwl4 (wl4 0) vsource dc=0 type=pwl wave=[ \
+    0 0 7.5e-07 0 7.51e-07 3.3 1e-06 3.3 1.001e-06 0 1.75e-06 0 \
+    1.751e-06 3.3 2e-06 3.3 2.001e-06 0 2.75e-06 0 2.751e-06 3.3 3e-06 3.3 \
+    3.001e-06 0 3.75e-06 0 ]
+XGp1 (vp p1) rram level=0
+XAp1 (p1 sl wl1) mos_switch beta=0.003795333 vt=0.951051 ns=0.0318
+XGn1 (vn n1) rram level=2
+XAn1 (n1 sl wl1) mos_switch beta=0.003795333 vt=0.951051 ns=0.0318
+XGp2 (vp p2) rram level=1
+XAp2 (p2 sl wl2) mos_switch beta=0.003795333 vt=0.951051 ns=0.0318
+XGn2 (vn n2) rram level=3
+XAn2 (n2 sl wl2) mos_switch beta=0.003795333 vt=0.951051 ns=0.0318
+XGp3 (vp p3) rram level=2
+XAp3 (p3 sl wl3) mos_switch beta=0.003795333 vt=0.951051 ns=0.0318
+XGn3 (vn n3) rram level=1
+XAn3 (n3 sl wl3) mos_switch beta=0.003795333 vt=0.951051 ns=0.0318
+XGp4 (vp p4) rram level=1
+XAp4 (p4 sl wl4) mos_switch beta=0.003795333 vt=0.951051 ns=0.0318
+XGn4 (vn n4) rram level=2
+XAn4 (n4 sl wl4) mos_switch beta=0.003795333 vt=0.951051 ns=0.0318
+Xin (sl vref vm clk) sl_stage k=0.696
+Xlog (q0 q1 q2 q3 q4 m0 m5 clk por rs hz) neuron_logic refr=0
+
+save clk wl1 vm spk
+tr tran stop=3.75e-06 step=5e-10 skipdc=yes

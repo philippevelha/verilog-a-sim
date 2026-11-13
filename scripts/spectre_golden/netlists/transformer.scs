@@ -1,0 +1,15 @@
+// transformer -- Spectre translation of circuits/transformer.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+
+V1 (in 0) vsource dc=1
+R1 (in p) resistor r=10
+L1 (p 0) inductor l=0.001
+L2 (s 0) inductor l=0.004
+R2 (s 0) resistor r=1000
+K1 mutual_inductor coupling=0.9 ind1=L1 ind2=L2
+
+opts2 options save=lvlpub nestlvl=1
+tr tran stop=0.0002 step=1e-07 skipdc=yes

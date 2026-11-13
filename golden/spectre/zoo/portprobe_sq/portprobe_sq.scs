@@ -1,0 +1,13 @@
+// portprobe_sq -- Spectre translation of circuits/portprobe_sq.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/portprobe_sq.va"
+
+V1 (s 0) vsource dc=0 type=sine sinedc=0 ampl=1 freq=1000000
+Rs (s a) resistor r=50
+M1 (a 0 out) portprobe_sq
+
+opts2 options save=lvlpub nestlvl=1
+tr tran stop=2e-06 step=2e-09

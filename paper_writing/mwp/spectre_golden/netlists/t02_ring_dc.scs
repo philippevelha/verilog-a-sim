@@ -1,0 +1,15 @@
+// t02_ring_dc -- golden reference for t02 (a): add-drop ring, tuning sweep -60..60 V at 1 GHz/V
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=1 nu0=193.4
+Vt (tune 0) vsource dc=0
+X2 (a_re a_im t_re t_im d_re d_im nu tune) mwp_ring nu_res=193.4 q1=2e4 q2=2e4 qi=1e5 kf=1e9
+Vk (k 0) vsource dc=3
+X3 (t_re t_im at k) mwp_pd resp=1
+X4 (d_re d_im ad k) mwp_pd resp=1
+Vst (at 0) vsource dc=0
+Vsd (ad 0) vsource dc=0
+save Vst:p Vsd:p
+sw dc dev=Vt param=dc start=-60 stop=60 step=0.5

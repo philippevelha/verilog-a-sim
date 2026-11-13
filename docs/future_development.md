@@ -219,6 +219,8 @@ good one — and that `wgpu` is the only tool allowed.
 - **Periodic steady state (shooting / harmonic balance)** — the RF analysis; needed for
   oscillators and mixers beyond "run a long transient". Shooting reuses the transient
   integrator plus a Newton loop over the initial state, and is the cheaper of the two.
+  **2026-11-12:** a staged proposal with gates and estimates is in
+  `docs/proposals/harmonic-balance.md` (harmonic balance, then periodic noise; not ratified).
 - **S-parameters** — AC with port normalization; small, mostly `va-cli`.
 - **Sensitivity analysis** (`.sens`) — item 4's infrastructure exposed directly.
 - **Pole-zero** — an eigenvalue problem on the linearized system; `faer` has the

@@ -1,0 +1,33 @@
+// mwp_bpd -- balanced photodetector: two matched photodiodes, difference current.
+//
+//   i = resp*1e-3 * LP1{ P_p/(1+P_p/psat) - cmr * P_n/(1+P_n/psat) }   delivered INTO `out`
+//   noise: shot of both diodes, 2 q (i_p + i_n + 2 idark)
+//
+// cmr < 1 is a responsivity mismatch (finite common-mode rejection). Limitations as mwp_pd.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_bpd(p_re, p_im, n_re, n_im, out, ref);
+    input p_re, p_im, n_re, n_im;
+    inout out, ref;
+    electrical p_re, p_im, n_re, n_im, out, ref;
+    electrical px, nx;
+    parameter real resp  = 0.8   from [0:inf);         // responsivity of each diode, A/W
+    parameter real f3db  = 0.0   from [0:inf);         // bandwidth, Hz (0: unlimited)
+    parameter real psat  = 0.0   from [0:inf);         // saturation power of each diode, mW (0: none)
+    parameter real idark = 0.0   from [0:inf);         // dark current of each diode, A
+    parameter real cmr   = 1.0   from [0:inf);         // responsivity of the n diode / the p diode
+    real pp, pn, tau, ip, in;
+    analog begin
+        tau = (f3db > 0.0) ? 1.0 / (`MWP_TWOPI * f3db) : 0.0;
+        pp  = V(p_re) * V(p_re) + V(p_im) * V(p_im);
+        pn  = V(n_re) * V(n_re) + V(n_im) * V(n_im);
+        I(px) <+ V(px) - ((psat > 0.0) ? pp / (1.0 + pp / psat) : pp);
+        I(px) <+ ddt(tau * V(px));
+        I(nx) <+ V(nx) - ((psat > 0.0) ? pn / (1.0 + pn / psat) : pn);
+        I(nx) <+ ddt(tau * V(nx));
+        ip = resp * 1e-3 * V(px);
+        in = cmr * resp * 1e-3 * V(nx);
+        I(ref, out) <+ ip - in;
+        I(ref, out) <+ white_noise(2.0 * `MWP_Q * (abs(ip) + abs(in) + 2.0 * idark), "shot");
+    end
+endmodule

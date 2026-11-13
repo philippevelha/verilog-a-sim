@@ -1,0 +1,19 @@
+// multiphysics__relay_bh -- Spectre translation of circuits/multiphysics/relay_bh.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/relay/relay_parts.va"
+
+VA (amb 0) vsource dc=293.15
+VC1 (c1 0) vsource dc=0 type=sine sinedc=0 ampl=0.3 freq=50
+G1 (0 p1 c1 0) vccs gm=1
+X1 (p1 0 0 th1) relay_coil g0=0
+XT1 (th1 amb) coil_thermal
+VC2 (c2 0) vsource dc=0 type=sine sinedc=0 ampl=0.02 freq=50
+G2 (0 p2 c2 0) vccs gm=1
+X2 (p2 0 0 th2) relay_coil g0=0
+XT2 (th2 amb) coil_thermal
+
+save X1.h X1.mm X2.h X2.mm
+tr tran stop=0.06 step=2e-05

@@ -1,0 +1,21 @@
+// mwp.vams -- conventions shared by the microwave-photonics library (mwp_*.va)
+//
+// OPTICAL PORT = two electrical nodes (x_re, x_im): the complex envelope A = re + j*im of the
+//   field E(t) = A(t) * exp(+j*2*pi*nu*t), in sqrt(mW): |A|^2 = V(re)^2 + V(im)^2 is mW.
+//   Ports are one-way: an output is an ideal source, an input only probes (no reflections).
+// CARRIER TAG  = one electrical node `nu`: the reference optical frequency of that envelope,
+//   1 V = 1 THz. Driven by the source; read by the parts whose response depends on the
+//   optical frequency (the ring). Light at another frequency inside the same envelope is a
+//   rotating envelope (the laser's `df`); light on another TAG is another bus.
+// Parts that combine two buses (coupler, MZM, ...) assume both carry the same tag.
+// Electrical disciplines only, so the same source compiles for any Verilog-A simulator.
+`ifdef MWP_VAMS
+`else
+`define MWP_VAMS 1
+`define MWP_C     2.99792458e8
+`define MWP_H     6.62607015e-34
+`define MWP_Q     1.602176634e-19
+`define MWP_KB    1.380649e-23
+`define MWP_PI    3.14159265358979323846
+`define MWP_TWOPI 6.28318530717958647693
+`endif

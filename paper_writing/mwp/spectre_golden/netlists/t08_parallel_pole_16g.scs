@@ -1,0 +1,16 @@
+// t08_parallel_pole_16g -- golden reference for t08: parallel mixer with 16.7 GHz modulator poles, RF 16 GHz -> 80 MHz
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=10
+Vrf (rf 0) vsource type=sine ampl=0.2 freq=16000000000 fundname="frf"
+Vlo (lo 0) vsource type=sine ampl=1.5 freq=15920000000 fundname="flo"
+Vn (vn 0) vsource dc=4
+Vp (vp 0) vsource dc=0
+X2 (a_re a_im c_re c_im lo rf vn vn vp) mwp_iqm vpi=4 f3db=16700000000
+Vk (k 0) vsource dc=3
+X4 (c_re c_im an k) mwp_pd resp=0.8
+Vs (an 0) vsource dc=0
+save Vs:p
+hb1 hb funds=["flo" "frf"] maxharms=[9 5] errpreset=conservative

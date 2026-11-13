@@ -13,6 +13,23 @@ hand-derived value in as if it were QSPICE's would defeat the entire point of an
 first genuine golden reference. The rest of this directory is still empty; see "Regenerating"
 below for exactly why, circuit by circuit.
 
+## Spectre references (`golden/spectre/`, adopted 2026-11-12)
+
+Cadence Spectre is the second oracle (`CLAUDE.md` §7), for what QSPICE cannot run: circuits that
+are Verilog-A throughout and harmonic balance with periodic noise. `golden/spectre/mwp/<deck>/`
+holds, per deck, Spectre's ASCII PSF results as written and the netlist (`<deck>.scs`), for
+SPECTRE 24.1.0.078. The run's log (`spectre.log`) and `environment.txt` are kept locally and are
+not committed (`golden/spectre/.gitignore`: they name the user, the server and the licence server,
+and record Spectre's timings, which the Cadence licence may not allow publishing). They
+come from `paper_writing/mwp/spectre/run.sh`, run on the author's licensed server, and the same
+rule applies as above: **real Spectre output only**, never a hand-made or post-processed file.
+Large transient waveforms (30–100 MB: the noise transients `11_*` and the oscillator transients
+`22`, `25`) are not committed; what was measured on them is recorded in
+`paper_writing/mwp/spectre/README.md`.
+
+The gate is `paper_writing/mwp/tests/t12_spectre_golden.py` (part of that library's `run_all.py`),
+not `cargo xtask validate`: the comparisons need the library's tone fits and PSF reader.
+
 ## The `.golden` format (DC and `.dc` sweep, so far)
 
 A single-operating-point `.golden` file is plain text, one `<node> <value>` pair per line, in

@@ -180,6 +180,15 @@ fn print_usage() {
          --stall-steps <n>       Transient stall watchdog: stop with E0609 when n
                                  step attempts in a row advance time by less than
                                  one tstep. Default 10000; 0 turns it off.
+         --tran-noise <fmax>     Noise in a transient run: every white noise source a
+                                 device declares (resistor thermal, shot, white_noise())
+                                 injects a random current, sampled every 1/(2 fmax) s
+                                 and joined by straight lines; spectrum flat to about
+                                 0.26 fmax. The time step is bounded to that interval.
+                                 Flicker and tabulated sources are left out (W0602).
+                                 One realization per run; not validated against golden.
+         --tran-noise-seed <n>   Seed of that realization (default 1). The same seed
+                                 gives the same run.
          --bypass                Device bypass in a transient run (SPICE's BYPASS): a
                                  device whose stamps depend only on its own unknowns
                                  reuses its last evaluation while they move less than
@@ -280,6 +289,40 @@ fn cmd_sim(args: &[String]) -> Result<()> {
                 )
         })?;
         va_cli::set_stall_attempts(Some(n).filter(|&n| n > 0));
+    }
+    // `--tran-noise <fmax>` / `--tran-noise-seed <n>`: white noise sources active in transient.
+    if let Some(v) = parse_flag(args, "--tran-noise") {
+        let fmax = v
+            .parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .ok_or_else(|| {
+                va_diag::Diagnostic::new(va_diag::codes::E0703)
+                    .arg("option", "--tran-noise")
+                    .arg("value", &v)
+                    .arg("expected", "a noise bandwidth in hertz, above zero")
+            })?;
+        let seed = match parse_flag(args, "--tran-noise-seed") {
+            None => 1,
+            Some(s) => s.parse::<u64>().map_err(|_| {
+                va_diag::Diagnostic::new(va_diag::codes::E0703)
+                    .arg("option", "--tran-noise-seed")
+                    .arg("value", &s)
+                    .arg("expected", "a non-negative integer")
+            })?,
+        };
+        if args.iter().any(|a| a == "--tran") {
+            println!(
+                "[va-cli] transient noise: white sources, bandwidth {fmax:e} Hz (one sample every {:e} s, spectrum flat to about {:e} Hz), seed {seed}",
+                0.5 / fmax,
+                0.26 * fmax
+            );
+        } else {
+            eprintln!(
+                "[va-cli] note: --tran-noise applies to a transient run (--tran) only; this analysis runs without it."
+            );
+        }
+        va_cli::set_tran_noise(Some(va_transient::noise::TranNoiseConfig { fmax, seed }));
     }
     // `--bypass` / `--bypass-reltol <x>`: device bypass (`va_cli::set_bypass`), transient only.
     let bypass_reltol = parse_flag(args, "--bypass-reltol");

@@ -1,10 +1,12 @@
-* Resistance of an NTC thermistor against temperature.
-*
-* A `$table_model` data file: one `x y` pair per line, whitespace or comma separated.
-* Blank lines and `*`, `#` or `//` comments are skipped. The rows need not be sorted --
-* elaboration sorts them, and rejects two rows that give one x two different y values.
-*
-*  T (K)    R (ohm)
+# Resistance of an NTC thermistor against temperature.
+#
+# A `$table_model` data file (LRM 2.4 section 9.21.1): one `x y` pair per line, columns
+# separated by spaces or tabs, comments from `#` to the end of the line. verilog-a-sim also
+# accepts `*` and `//` comments and comma separators; other simulators do not (Spectre stops
+# with VLOGA-5070 on a `*` line), so this file keeps to the LRM's form. The rows need not be
+# sorted -- elaboration sorts them, and rejects two rows that give one x two different y values.
+#
+#  T (K)    R (ohm)
    233.15   96300
    253.15   35300
    273.15   14100

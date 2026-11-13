@@ -1,0 +1,13 @@
+// multiphysics__reram_freq_5meg -- Spectre translation of circuits/multiphysics/reram_freq_5meg.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/reram/reram.va"
+
+V1 (in 0) vsource dc=0 type=sine sinedc=0 ampl=1.6 freq=5000000
+R1 (in te) resistor r=2000
+X1 (te 0) reram
+
+save in te X1.g
+tr tran stop=4e-07 step=1e-11

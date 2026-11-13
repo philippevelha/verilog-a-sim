@@ -1,0 +1,16 @@
+// multiphysics__tec_energy -- Spectre translation of circuits/multiphysics/tec_energy.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/tec/tec.va"
+ahdl_include "models/multiphysics/tec/thermal_parts.va"
+
+V1 (drv 0) vsource dc=5
+X1 (drv 0 cold hot) tec alpha0=0.05 alpha1=0.0001 R0=2 tcr=0.004 K=0.5
+XRC (cold amb) thermal_res Rth=2
+XRH (hot amb) thermal_res Rth=0.25
+XA (amb) ambient tamb=298.15
+
+opts2 options save=lvlpub nestlvl=1
+op1 dc

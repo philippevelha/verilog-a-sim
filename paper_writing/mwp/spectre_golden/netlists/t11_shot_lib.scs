@@ -1,0 +1,17 @@
+// t11_shot_lib -- golden reference for t11 (c): shot noise under a stepped optical power, 50 ohm / 500 MHz load, lib (strobe 25 ps)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=10
+Vrf (rf 0) vsource dc=0
+Vb (vb 0) vsource type=pulse val0=0.819331058797 val1=3.1806689412 delay=1000e-9 rise=1e-9 fall=1e-9 width=1000e-9 period=10
+X2 (a_re a_im b_re b_im bb_re bb_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+Vk (k 0) vsource dc=3
+X3 (b_re b_im an k) mwp_pd resp=0.8
+RL (an 0) resistor r=50 isnoisy=no
+CL (an 0) capacitor c=6.36619772368e-12
+XN1 (0 an) mwp_noise psd=2.307134e-21 fmax=20e9 seed0=1
+XN2 (0 an) mwp_noise psd=3.315214e-22 fmax=20e9 seed0=2
+save an
+tr tran stop=2000e-9 maxstep=25e-12 strobeperiod=25e-12

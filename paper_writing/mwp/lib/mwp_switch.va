@@ -1,0 +1,34 @@
+// mwp_switch -- 2x2 optical switch / tunable coupler set by a control voltage.
+//
+//   th = (pi/2) * v / vsw      (v = V(ctl) after one pole at f3db)
+//   [c]   sqrt(il) [  cos th   j sin th ] [a]
+//   [d] =          [ j sin th   cos th  ] [b]
+//
+// V(ctl) = 0 is the bar state (a->c, b->d), V(ctl) = vsw the cross state (a->d, b->c); in
+// between it is a variable power splitter. Limitations: ideal extinction in both states
+// (limited only by how well V(ctl) is set), no switching transient beyond the single pole.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_switch(a_re, a_im, b_re, b_im, c_re, c_im, d_re, d_im, ctl);
+    input a_re, a_im, b_re, b_im, ctl;
+    output c_re, c_im, d_re, d_im;
+    electrical a_re, a_im, b_re, b_im, c_re, c_im, d_re, d_im, ctl;
+    electrical vx;
+    parameter real vsw   = 1.0 from (0:inf);           // control voltage of the cross state, V
+    parameter real il_db = 0.0 from [0:inf);           // insertion loss, dB
+    parameter real f3db  = 0.0 from [0:inf);           // switching bandwidth, Hz (0: unlimited)
+    real tau, th, t, k, g;
+    analog begin
+        tau = (f3db > 0.0) ? 1.0 / (`MWP_TWOPI * f3db) : 0.0;
+        I(vx) <+ V(vx) - V(ctl);
+        I(vx) <+ ddt(tau * V(vx));
+        th = 0.5 * `MWP_PI * V(vx) / vsw;
+        g  = pow(10.0, -il_db / 20.0);
+        t  = g * cos(th);
+        k  = g * sin(th);
+        V(c_re) <+ t * V(a_re) - k * V(b_im);
+        V(c_im) <+ t * V(a_im) + k * V(b_re);
+        V(d_re) <+ t * V(b_re) - k * V(a_im);
+        V(d_im) <+ t * V(b_im) + k * V(a_re);
+    end
+endmodule

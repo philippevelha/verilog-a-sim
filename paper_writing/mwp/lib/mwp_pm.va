@@ -1,0 +1,34 @@
+// mwp_pm -- electro-optic phase modulator.
+//
+//   A_out = sqrt(il) * A_in * exp(j * pi * v / vpi),   v = V(rf_p, rf_n) after one pole at f3db
+//
+// The electrode is a termination `rterm` (with its thermal noise) across the RF port; rterm = 0
+// leaves the port open. Limitations: lumped electrode (no velocity mismatch, no skin-effect
+// roll-off), no residual amplitude modulation, Vpi independent of frequency and wavelength.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_pm(i_re, i_im, o_re, o_im, rf_p, rf_n);
+    input i_re, i_im;
+    output o_re, o_im;
+    inout rf_p, rf_n;
+    electrical i_re, i_im, o_re, o_im, rf_p, rf_n;
+    electrical vx;                                     // band-limited drive
+    parameter real vpi   = 4.0  from (0:inf);          // half-wave voltage, V
+    parameter real il_db = 0.0  from [0:inf);          // insertion loss, dB
+    parameter real f3db  = 0.0  from [0:inf);          // electro-optic bandwidth, Hz (0: unlimited)
+    parameter real rterm = 50.0 from [0:inf);          // RF termination, ohm (0: open)
+    real th, g, tau;
+    analog begin
+        tau = (f3db > 0.0) ? 1.0 / (`MWP_TWOPI * f3db) : 0.0;
+        I(vx) <+ V(vx) - V(rf_p, rf_n);
+        I(vx) <+ ddt(tau * V(vx));
+        if (rterm > 0.0) begin
+            I(rf_p, rf_n) <+ V(rf_p, rf_n) / rterm;
+            I(rf_p, rf_n) <+ white_noise(4.0 * `MWP_KB * $temperature / rterm, "rterm");
+        end
+        th = `MWP_PI * V(vx) / vpi;
+        g  = pow(10.0, -il_db / 20.0);
+        V(o_re) <+ g * (V(i_re) * cos(th) - V(i_im) * sin(th));
+        V(o_im) <+ g * (V(i_re) * sin(th) + V(i_im) * cos(th));
+    end
+endmodule

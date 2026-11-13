@@ -1,0 +1,126 @@
+{
+ "test": "t08_mixer",
+ "ok": true,
+ "wall_s": 10.39,
+ "rows": [
+  {
+   "what": "series: IF amplitude at 80 MHz",
+   "sim": 0.0001542627062862,
+   "ref": 0.00015427708823708742,
+   "err": 9.322156032219081e-05,
+   "tol": 0.0003,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "series: mean photocurrent",
+   "sim": 0.002000042505101772,
+   "ref": 0.002,
+   "err": 2.1252550886025415e-05,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "parallel: IF amplitude at 80 MHz",
+   "sim": 8.850599390640575e-05,
+   "ref": 8.850373529586455e-05,
+   "err": 2.5519945950894798e-05,
+   "tol": 0.0003,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "parallel: mean photocurrent",
+   "sim": 0.00032417818005721057,
+   "ref": 0.0003241743672917459,
+   "err": 1.1761464968780217e-05,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "series: RF feed-through at the detector, R P J1(m_RF)/2",
+   "sim": 0.000313194701732084,
+   "ref": 0.000313191314858639,
+   "err": 1.0814072052192651e-05,
+   "tol": 0.001,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "parallel: RF and LO feed-through / IF (carrier suppressed: none)",
+   "sim": 2.071596073790547e-05,
+   "ref": 0.0,
+   "err": 2.071596073790547e-05,
+   "tol": 0.0001,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "conversion-efficiency advantage of the carrier-suppressed mixer at equal detector current",
+   "sim": 10.979343661088212,
+   "ref": 10.978229813389945,
+   "err": 0.0011138476982672785,
+   "tol": 0.01,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "note": "(LO drive 1.5 V = 0.375 Vpi. Minasian et al. measured 23.7 dB with a 45.5 dB LO suppression and an EDFA; their drive levels are not given, so the number here is this model's, not a reproduction.)"
+  },
+  {
+   "note": "each run: 14436 points, 1.6 s"
+  },
+  {
+   "what": "parallel mixer, RF 2 GHz -> 80 MHz, modulator pole 16.7 GHz: IF amplitude",
+   "sim": 8.738152520234419e-05,
+   "ref": 8.73518037504575e-05,
+   "err": 0.00034025000756242915,
+   "tol": 0.0005,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "parallel mixer, RF 6 GHz -> 80 MHz, modulator pole 16.7 GHz: IF amplitude",
+   "sim": 7.891746076266763e-05,
+   "ref": 7.889775984036023e-05,
+   "err": 0.0002497019224280657,
+   "tol": 0.0005,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "parallel mixer, RF 10 GHz -> 80 MHz, modulator pole 16.7 GHz: IF amplitude",
+   "sim": 6.60448441356512e-05,
+   "ref": 6.604818649742677e-05,
+   "err": 5.060489852667662e-05,
+   "tol": 0.0005,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "parallel mixer, RF 16 GHz -> 80 MHz, modulator pole 16.7 GHz: IF amplitude",
+   "sim": 4.7244420333429715e-05,
+   "ref": 4.724959063301467e-05,
+   "err": 0.00010942527788474118,
+   "tol": 0.0005,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "note": "conversion roll-off 2 -> 16 GHz: 5.34 dB (two modulator poles, RF and LO)"
+  }
+ ]
+}

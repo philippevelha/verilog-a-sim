@@ -1,0 +1,139 @@
+{
+ "test": "t06_optical_sampling",
+ "ok": true,
+ "wall_s": 45.87,
+ "rows": [
+  {
+   "what": "pulse charge, output 1: max |E - closed form| / E_pulse",
+   "sim": 1.1991327643739707e-05,
+   "ref": 0.0,
+   "err": 1.1991327643739707e-05,
+   "tol": 2e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "pulse charge, output 2: max |E - closed form| / E_pulse",
+   "sim": 1.199132764020561e-05,
+   "ref": 0.0,
+   "err": 1.199132764020561e-05,
+   "tol": 2e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "pulse energy conserved between the outputs: max |E1 + E2 - E_pulse| / E_pulse",
+   "sim": 1.1999999999985206e-05,
+   "ref": 0.0,
+   "err": 1.1999999999985206e-05,
+   "tol": 2e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "third harmonic / fundamental before linearisation: J3(m)/J1(m) with the pulse aperture",
+   "sim": 0.07216927768490586,
+   "ref": 0.07216920003932037,
+   "err": 1.0758825849066648e-06,
+   "tol": 0.002,
+   "rel": true,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "SINAD of the raw difference/sum samples 22.8 dB (3.5 bit); after arcsin 63.1 dB (10.2 bit)"
+  },
+  {
+   "what": "raw SINAD = third-harmonic limit -20 log10(J3/J1) (higher harmonics included)",
+   "sim": 22.83122976843587,
+   "ref": 22.83123900542531,
+   "err": 9.236989441774313e-06,
+   "tol": 0.05,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "what": "linearised samples: amplitude = aperture factor exp(-(w sigma)^2/2)",
+   "sim": 0.9975952475888573,
+   "ref": 0.998473103425902,
+   "err": 0.0008791982818892639,
+   "tol": 0.003,
+   "rel": true,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "linearised SINAD above 60 dB (limit: the finite pulse inside the sine law)",
+   "sim": 1.0,
+   "ref": 1.0,
+   "err": 0.0,
+   "tol": 0,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "208616 time points for 64 pulses, 8.1 s"
+  },
+  {
+   "what": "jitter 100 fs rms at 10.36 GHz: SNR vs 1/(2 pi f sigma)^2 (256 samples: +-0.6 dB statistical)",
+   "sim": 43.05312575773141,
+   "ref": 43.72645693942811,
+   "err": 0.6733311816967031,
+   "tol": 1.5,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "note": "jitter-limited resolution 6.86 bit; 658646 points, 26.5 s"
+  },
+  {
+   "what": "channel D (even pulses): max |E - closed form| / E_pulse",
+   "sim": 1.6517128635469666e-06,
+   "ref": 0.0,
+   "err": 1.6517128635469666e-06,
+   "tol": 2e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "channel C (odd pulses): max |E - closed form| / E_pulse",
+   "sim": 1.8587193084717394e-06,
+   "ref": 0.0,
+   "err": 1.8587193084717394e-06,
+   "tol": 2e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "charge reaching channel C around a pulse routed to D / E_pulse (bound: detector tail 5e-4)",
+   "sim": 0.0005181925601751565,
+   "ref": 0.0,
+   "err": 0.0005181925601751565,
+   "tol": 0.0006,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "interleaved 2 GS/s record: SINAD equals that of the ideal samples",
+   "sim": 22.830920704968815,
+   "ref": 22.83091868215246,
+   "err": 2.022816353530743e-06,
+   "tol": 0.2,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "note": "112746 points, 7.3 s"
+  }
+ ]
+}

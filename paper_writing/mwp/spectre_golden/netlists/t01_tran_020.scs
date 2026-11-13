@@ -1,0 +1,15 @@
+// t01_tran_020 -- golden reference for t01 (c): two tones 1.0/1.1 GHz, 0.2 V each (strobe 2 ps)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=10 
+Vb (vb 0) vsource dc=2
+X2 (a_re a_im b_re b_im bb_re bb_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 
+Vk (k 0) vsource dc=3
+X3 (b_re b_im an k) mwp_pd resp=0.8 
+V1 (rf m) vsource type=sine ampl=0.2 freq=1.0e9
+V2 (m 0) vsource type=sine ampl=0.2 freq=1.1e9
+Vs (an 0) vsource dc=0
+save Vs:p
+tr tran stop=20e-9 maxstep=2e-12 strobeperiod=2e-12

@@ -1,0 +1,12 @@
+// multiphysics__optomech_limit_cycle -- Spectre translation of circuits/multiphysics/optomech_limit_cycle.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/optomech/optomech.va"
+
+VP (pin 0) vsource dc=1.1336e-07
+X1 (pin) optomech x0=1e-14 every=100
+
+save X1.x
+tr tran stop=0.002 step=1e-09

@@ -1,0 +1,124 @@
+{
+ "test": "t04_oeo",
+ "ok": true,
+ "wall_s": 97.3,
+ "rows": [
+  {
+   "note": "td = 5.02 ns: small-signal loop gain 1.878; 281844 points, 43 s"
+  },
+  {
+   "what": "td 5.02 ns: oscillation frequency",
+   "sim": 9969037923.64536,
+   "ref": 9969545333.089632,
+   "err": 5.089594633638502e-05,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "what": "td 5.02 ns: amplitude at the modulator",
+   "sim": 2.7104400624627165,
+   "ref": 2.705071483753115,
+   "err": 0.001984634691484318,
+   "tol": 0.005,
+   "rel": true,
+   "unit": "V",
+   "ok": true
+  },
+  {
+   "what": "td 5.02 ns: neighbouring loop modes / carrier",
+   "sim": 3.830197105273698e-05,
+   "ref": 0.0,
+   "err": 3.830197105273698e-05,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "td 5.02 ns: envelope settled (peak in 120-150 ns / after 170 ns)",
+   "sim": 1.0002225002247105,
+   "ref": 1.0,
+   "err": 0.0002225002247104868,
+   "tol": 0.002,
+   "rel": true,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "td = 4.98 ns: small-signal loop gain 1.877; 277801 points, 36 s"
+  },
+  {
+   "what": "td 4.98 ns: oscillation frequency",
+   "sim": 10030136432.46108,
+   "ref": 10030665078.271719,
+   "err": 5.270296700301285e-05,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "Hz",
+   "ok": true
+  },
+  {
+   "what": "td 4.98 ns: amplitude at the modulator",
+   "sim": 2.695862728293968,
+   "ref": 2.704451147569558,
+   "err": 0.0031756607189257404,
+   "tol": 0.005,
+   "rel": true,
+   "unit": "V",
+   "ok": true
+  },
+  {
+   "what": "td 4.98 ns: neighbouring loop modes / carrier",
+   "sim": 2.1726506026371977e-05,
+   "ref": 0.0,
+   "err": 2.1726506026371977e-05,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "td 4.98 ns: envelope settled (peak in 120-150 ns / after 170 ns)",
+   "sim": 1.0002381369885813,
+   "ref": 1.0,
+   "err": 0.0002381369885813278,
+   "tol": 0.002,
+   "rel": true,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "default history (512 samples), td = 5.02 ns: frequency error -6.4e-05, amplitude error -0.42% -- the 10 GHz tone is under-resolved in the delay line; VA_ABSDELAY_POINTS=4096 is used above"
+  },
+  {
+   "what": "open-loop noise at the detector load: shot + RIN + thermal",
+   "sim": 1.668227e-17,
+   "ref": 1.6682267503373517e-17,
+   "err": 1.4965750199163068e-07,
+   "tol": 0.001,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "note": "phase-noise ESTIMATE (not simulated), carrier 9.9690 GHz, -2.9 dBm at the load: delta = -151.9 dB/Hz, tau = 5.02 + 1.46 ns"
+  },
+  {
+   "note": "  L(1e+04 Hz) = -84.0 dBc/Hz"
+  },
+  {
+   "note": "  L(1e+05 Hz) = -104.0 dBc/Hz"
+  },
+  {
+   "note": "  L(1e+06 Hz) = -124.0 dBc/Hz"
+  },
+  {
+   "note": "  L(1e+07 Hz) = -144.0 dBc/Hz"
+  },
+  {
+   "note": "  a 1 km loop (tau = 4.9 us) with the same delta: L(1e4 Hz) = -141.6 dBc/Hz (not simulable here: 1e5 RF periods in the delay line)"
+  }
+ ]
+}

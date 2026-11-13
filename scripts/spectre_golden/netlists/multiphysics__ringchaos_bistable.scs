@@ -1,0 +1,16 @@
+// multiphysics__ringchaos_bistable -- Spectre translation of circuits/multiphysics/ringchaos_bistable.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/ringchaos/rc_parts.va"
+
+VW (wctl 0) vsource dc=1550.155016
+VP (pctl 0) vsource dc=0 type=pwl wave=[ \
+    0 0 3e-05 6 6e-05 0 ]
+XL (pctl wctl b0r b0i wl) laser
+X1 (b0r b0i b1r b1i wl t1) siring
+XD (b1r b1i pout) detector
+
+save pctl pout t1
+tr tran stop=6e-05 step=1e-09

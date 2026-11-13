@@ -1,0 +1,37 @@
+// mwp_oamp -- optical amplifier (EDFA or SOA): saturable gain and ASE.
+//
+//   G_ss  = G0 / (1 + G0*P_in/psat)          (psat: saturated output power, mW)
+//   tau_g * d(a)/dt = sqrt(G_ss) - a         a = amplitude gain; A_out = a * A_in
+//   ASE   : white noise on each field quadrature, one-sided PSD  S = (F/2)*h*nu*(G - 1)
+//           (F = 10^(nf_db/10) = 2 n_sp), the density per polarisation, so that the
+//           signal-spontaneous beat current density after a detector is 4 R^2 G P_in S.
+//
+// tau_g = 1 ms and more is an EDFA (the gain sits at its operating-point value through a
+// nanosecond transient); 100 ps is an SOA with pattern effects. Limitations: flat gain
+// spectrum, no ASE-ASE beat noise and no ASE power in the DC output (so no ASE-induced
+// saturation), no SOA chirp (alpha factor), single polarisation.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_oamp(i_re, i_im, o_re, o_im);
+    input i_re, i_im;
+    output o_re, o_im;
+    electrical i_re, i_im, o_re, o_im;
+    electrical ga;                                     // amplitude gain state
+    parameter real g0_db = 20.0  from [0:inf);         // small-signal gain, dB
+    parameter real psat  = 0.0   from [0:inf);         // saturated output power, mW (0: none)
+    parameter real nf_db = 5.0   from [0:inf);         // noise figure, dB
+    parameter real tau_g = 1e-3  from [0:inf);         // gain recovery time, s
+    parameter real nu0   = 193.4 from (0:inf);         // optical frequency for h*nu, THz
+    real g0, p, gss, s;
+    analog begin
+        g0  = pow(10.0, g0_db / 10.0);
+        p   = V(i_re) * V(i_re) + V(i_im) * V(i_im);
+        gss = (psat > 0.0) ? g0 / (1.0 + g0 * p / psat) : g0;
+        I(ga) <+ V(ga) - sqrt(gss);
+        I(ga) <+ ddt(tau_g * V(ga));
+        s = 0.5 * pow(10.0, nf_db / 10.0) * `MWP_H * nu0 * 1e12 * 1e3
+            * max(V(ga) * V(ga) - 1.0, 0.0);
+        V(o_re) <+ V(ga) * V(i_re) + white_noise(s, "ase_i");
+        V(o_im) <+ V(ga) * V(i_im) + white_noise(s, "ase_q");
+    end
+endmodule

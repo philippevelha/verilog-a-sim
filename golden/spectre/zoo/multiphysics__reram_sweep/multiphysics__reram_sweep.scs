@@ -1,0 +1,16 @@
+// multiphysics__reram_sweep -- Spectre translation of circuits/multiphysics/reram_sweep.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/reram/reram.va"
+
+V1 (in 0) vsource dc=0 type=pwl wave=[ \
+    0 0 0.0025 1.6 0.005 0 0.0075 -1.6 0.01 0 ]
+R1 (in te1) resistor r=2000
+X1 (te1 0) reram tamb=300
+R2 (in te2) resistor r=2000
+X2 (te2 0) reram tamb=400
+
+save X1.g X2.g
+tr tran stop=0.01 step=1e-06

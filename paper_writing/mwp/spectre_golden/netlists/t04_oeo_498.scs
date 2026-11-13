@@ -1,0 +1,19 @@
+// t04_oeo_498 -- golden reference for t04: oscillator start-up, loop delay 4.98 ns (strobe 2.5 ps from 100 ns)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=10
+Vb (vb 0) vsource dc=2
+X2 (a_re a_im b_re b_im bb_re bb_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+X3 (b_re b_im c_re c_im) mwp_delay td=4.98e-09
+Vk (k 0) vsource dc=3
+X4 (c_re c_im an k) mwp_pd resp=0.8
+RL (an 0) resistor r=50
+G1 (rf 0 an 0) vccs gm=0.25
+Rt (rf 0) resistor r=50
+Lt (rf 0) inductor l=1.59154943092e-11
+Ct (rf 0) capacitor c=1.59154943092e-11
+Ik (0 rf) isource type=pulse val0=0 val1=1e-3 delay=0 rise=10e-12 fall=10e-12 width=50e-12 period=1
+save rf
+tr tran stop=200e-9 maxstep=1e-12 strobeperiod=2.5e-12 strobestart=100e-9

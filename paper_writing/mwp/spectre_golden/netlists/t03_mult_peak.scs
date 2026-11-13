@@ -1,0 +1,14 @@
+// t03_mult_peak -- golden reference for t03 (b): MZM frequency multiplier at peak bias, 10 GHz, 3 V (strobe T/400)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+X1 (a_re a_im nu) mwp_laser p_mw=10
+Vrf (rf 0) vsource type=sine ampl=3 freq=10e9
+Vb (vb 0) vsource dc=0
+X2 (a_re a_im b_re b_im bb_re bb_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4
+Vk (k 0) vsource dc=3
+X3 (b_re b_im an k) mwp_pd resp=0.8
+Vs (an 0) vsource dc=0
+save Vs:p
+tr tran stop=4e-10 maxstep=2.5e-13 strobeperiod=2.5e-13

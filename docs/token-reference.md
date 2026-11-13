@@ -2006,7 +2006,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `weak0` | Reserved, no grammar production (net strength: weak drive to 0) | N/A | N/A | Digital net-strength only | No C analogue |
 | `weak1` | Reserved, no grammar production (net strength: weak drive to 1) | N/A | N/A | Digital net-strength only | No C analogue |
 | `while` | Simulation-time control flow, §1.5 | `while (cond) body` | Dynamic condition | Analog-block only | C `while` |
-| `white_noise` | Dynamic (noise-channel), §1.5 | `white_noise(pwr[, "name"])` call | Lowers to `Builtin::WhiteNoise(pwr)`; value `0` outside noise analysis, PSD `pwr` within it | Analog-block only | No general-purpose analogue |
+| `white_noise` | Dynamic (noise-channel), §1.5 | `white_noise(pwr[, "name"])` call | Lowers to `Builtin::WhiteNoise(pwr)`; value `0` outside noise analysis, PSD `pwr` within it; with `va-cli --tran-noise <fmax>` (2.55.0) a white source also injects a random current of that density in transient (`va_transient::noise`: independent samples every `1/(2 fmax)` joined by lines, evaluated at the solution being tried, reproducible by seed), while `flicker_noise` and `noise_table` are left out with `W0602` | Analog-block only | No general-purpose analogue |
 | `wire` | Reserved, no grammar production (default digital net type) | N/A | N/A | Digital structural only | Closest to a C wire/signal — this project always requires an explicit `electrical`/`thermal` discipline instead |
 | `wor` | Reserved, no grammar production (wired-OR net type) | N/A | N/A | Digital structural only | No C analogue |
 | `xnor` | Reserved, no grammar production (digital gate primitive) | N/A | N/A | Digital gate level only | Loosely C's `!(a ^ b)`, minus gate timing |

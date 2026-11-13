@@ -1,0 +1,17 @@
+// multiphysics__speaker_thermal -- Spectre translation of circuits/multiphysics/speaker_thermal.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/speaker/speaker_parts.va"
+
+V1 (p 0) vsource dc=0 type=sine sinedc=0 ampl=40 freq=200
+VA (amb 0) vsource dc=293.15
+X1 (p 0 t th) driver tlog=2
+XC (t) chamber
+XH (t m) horn N=32
+XM (m) mouth
+XT (th amb) vc_thermal
+
+save m th
+tr tran stop=12 step=0.000125

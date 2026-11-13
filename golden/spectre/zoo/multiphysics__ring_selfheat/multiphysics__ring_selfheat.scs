@@ -1,0 +1,22 @@
+// multiphysics__ring_selfheat -- Spectre translation of circuits/multiphysics/ring_selfheat.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/ringbank/ring_parts.va"
+
+VW (wctl 0) vsource dc=1549.7 type=pwl wave=[ \
+    0 1549.7 1 1550.6 2 1549.7 ]
+VP1 (p1 0) vsource dc=0.1
+VP2 (p2 0) vsource dc=20
+XL1 (p1 wctl in1 wl1) laser
+XR1 (in1 wl1 th1 dr1 t1) ring
+XC1 (t1) thermal_cap
+XG1 (t1 0) thermal_res
+XL2 (p2 wctl in2 wl2) laser
+XR2 (in2 wl2 th2 dr2 t2) ring
+XC2 (t2) thermal_cap
+XG2 (t2 0) thermal_res
+
+save th1 th2 t2
+tr tran stop=2 step=0.0005

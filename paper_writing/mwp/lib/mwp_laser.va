@@ -1,0 +1,38 @@
+// mwp_laser -- single-frequency laser: power, frequency offset, linewidth, RIN.
+//
+//   A(t) = sqrt(p_mw) * (1 + n_am) * exp(j*(2*pi*df*t + phi0 + n_pm)),  tag = nu0
+//
+// `df` places the line `df` Hz above the tag, as a rotating envelope: two lasers with the same
+// nu0 and different df beat at the difference on a photodiode (optical heterodyning).
+// Noise (small-signal .noise analysis only; a transient run is noiseless):
+//   n_am : white, one-sided PSD rin/4          -> power noise rin * P^2 (rin linear, 1/Hz)
+//   n_pm : PSD lw/(pi f^2) rad^2/Hz one-sided  -> Lorentzian line of FWHM `lw` Hz
+// Limitations: no relaxation-oscillation peak in the RIN, no 1/f frequency noise, no
+// reflection sensitivity, single polarisation. A rotating envelope bounds the time step to
+// 1/(|df|*spp).
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_laser(o_re, o_im, nu);
+    output o_re, o_im, nu;
+    electrical o_re, o_im, nu;
+    electrical nam, npm;                               // noise nodes (zero in DC/transient)
+    parameter real p_mw = 1.0    from [0:inf);         // optical power, mW
+    parameter real nu0  = 193.4  from (0:inf);         // carrier tag, THz
+    parameter real df   = 0.0;                         // offset from the tag, Hz
+    parameter real phi0 = 0.0;                         // phase at t = 0, rad
+    parameter real lw   = 0.0    from [0:inf);         // Lorentzian linewidth (FWHM), Hz
+    parameter real rin  = 0.0    from [0:inf);         // relative intensity noise, 1/Hz (linear)
+    parameter real spp  = 32.0   from [4:inf);         // time steps per beat period 1/|df|
+    real th, amp;
+    analog begin
+        V(nam) <+ white_noise(rin / 4.0, "rin");
+        V(npm) <+ flicker_noise(lw / `MWP_PI, 2.0, "linewidth");
+        th  = `MWP_TWOPI * df * $abstime + phi0 + V(npm);
+        amp = sqrt(p_mw) * (1.0 + V(nam));
+        V(o_re) <+ amp * cos(th);
+        V(o_im) <+ amp * sin(th);
+        V(nu)   <+ nu0;
+        if (df != 0.0)
+            $bound_step(1.0 / (abs(df) * spp));
+    end
+endmodule

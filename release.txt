@@ -22,6 +22,215 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.55.0+6 - 2026-11-13
+---------------------
+**Raw Spectre output is kept local; a time and memory comparison is kept local** (docs and
+.gitignore only; author's decision).
+golden/spectre/.gitignore, the READMEs of golden/, golden/spectre/mwp/ and golden/spectre/zoo/.
+  * spectre.log, summary*.txt and environment*.txt are no longer committed: they name the user,
+    the server and the licence server, and record Spectre's own timings and memory. The PSF
+    results, their logFile indexes and the netlists remain the committed golden data.
+  * A per-deck comparison of wall time and peak memory with Spectre was measured (59 decks) and
+    is kept in golden/spectre/zoo/performance-vs-spectre.local.md, gitignored, until the
+    author has checked what the Cadence licence agreement allows about publishing benchmark
+    comparisons. No figures from it are published here.
+  * Cost: the warnings that decide whether a Spectre result is golden (SFE-101, SFE-3239, ...)
+    are in the logs, which a reader of the repository can no longer see; the check is done
+    locally before a result is copied in.
+
+
+2.55.0+5 - 2026-11-13
+---------------------
+**Second Spectre round for the circuits without a QSPICE golden: 56 results kept, two
+translator defects found by reading the warnings** (data, scripts and docs; no code change).
+golden/spectre/zoo/, scripts/spectre_golden/, models/thermistor.tbl.
+  * The server ran the standard set: 72 of 86 decks clean (round 1: 33 of 105). 24 of the 72
+    simulated the wrong circuit, visible only as warnings in spectre.log: `TYPE` on instances
+    of modules that declare it a model parameter (SFE-3239; nine NAND/inverter decks), and the
+    SG13G2 PSP103 cards' lower-case names, which Spectre does not match to PSP103's upper-case
+    parameters and drops (SFE-101; every SNN transistor deck). Both came from net2spectre.py
+    reading only a model's top file; it now inlines `include files, and writes each parameter
+    in the spelling the module declares. 28 netlists change, no others. Those 24 outputs are
+    not committed; the rule for a golden file is now "no SFE-101/3239/30 in its log".
+  * models/thermistor.tbl takes `#` comments (LRM 9.21.1 allows only `#`; Spectre stops on
+    `*` with VLOGA-5070). verilog-a-sim's result is unchanged (it also accepts `*` and `//`,
+    an extension nothing warns about). `save X1.v[0]` is now escaped as `X1.v\[0\]` (stopped
+    both hh_* decks); unverified until the next round.
+  * verilog-a-sim 2.55.0+4 against the 56 (compare_zoo.py, CLAUDE.md section 7 tolerances): 41 agree.
+    Known: the port-current approximation (four transient decks, and now portprobe_ac, error 1.0
+    in AC). New and not diagnosed: NAND bsimsoi (ours stays at 0.44 V where Spectre reaches 0;
+    floating body; gmin difference suspected, untested) and bsimbulk107 (0.7-7 mV of input at a
+    steep edge, 0.23 of output). Just over tolerance: piezo_linear, reram_sweep, seu_collection
+    (1.05-1.31e-3). Event-sensitive, needing an event metric: breaker_interrupt, ringchaos_*.
+    $finish semantics: current_limit. Spike interpolation: cap_fast_edge.
+  * Not fixed, decisions: the li-ion and speaker models index net arrays with a parameter
+    (`sh[N-1]`), LRM-legal and rejected by Spectre (VACOMP-1192); gray_scott's 2-D net array.
+  * compare_zoo.py: a documented `--reltol 1e-5.` is no longer read with its full stop, an
+    unreadable Spectre result no longer ends the run, and a deck without a documented command
+    line is run with the models its Spectre netlist includes.
+
+
+2.55.0+4 - 2026-11-13
+---------------------
+**Roadmap: displacement current in `I(<port>)` and `I(branch)` is a fix to do** (docs only).
+docs/roadmap.md, item 8 of "After 2.0" and its own section.
+  * Found by the Spectre golden runs: the four displacement-current gates of 2026-08-29
+    (portprobe_ramp, portprobe_sq, selfprobe_ramp, nlcap_ramp) differ from Spectre by the whole
+    capacitive current (30-57 % RMS of the swing); Spectre matches V/r + C dV/dt to 2e-4, ours
+    equals V/r to 4e-7. The approximation was documented, but nothing warns when it applies.
+  * The 2026-08-29 blocker ("needs an Interface beta change") has expired: AnalysisCtx carries the
+    rate-reconstruction coefficients since 2026-08-31. Expected local to va-frontend/va-codegen;
+    to be confirmed. Step 1 is to stop the silence (warn or refuse in transient).
+  * Also in this tree since 2.55.0+3, not yet in an entry: golden/spectre/zoo (24 decks of Spectre
+    output, provenance README) and scripts/spectre_golden (net2spectre.py, make_package.py,
+    run.sh, compare_zoo.py: 17 of 24 decks agree with Spectre; the 7 others explained in the
+    README). Measured, not re-run for this entry; no Rust code changed.
+
+
+2.55.0+3 - 2026-11-12
+---------------------
+**Cadence Spectre adopted as a second golden reference** (author's decision; docs, golden data and
+a library test; no simulator change). QSPICE stays the reference for the zoo; Spectre
+(SPECTRE 24.1.0.078, on the author's licensed Linux server) is the reference for circuits that are
+Verilog-A throughout and for harmonic balance and periodic noise, which QSPICE does not have.
+  * Rules: CLAUDE.md section 5's bullet and section 7, docs/validation.md, golden/README.md; the
+    harmonic-balance proposal's oracle question is answered (docs/proposals/harmonic-balance.md,
+    docs/roadmap.md).
+  * Data: golden/spectre/mwp/, twelve decks of real Spectre output (ASCII PSF, each with its netlist
+    and log, 1.3 MB) and a provenance README. The four large transient waveforms (30-100 MB each)
+    are not committed; what was measured on them is in paper_writing/mwp/spectre/README.md.
+  * Gate: paper_writing/mwp/tests/t12_spectre_golden.py runs the same circuits in verilog-a-sim
+    and compares: 16 of 16 within tolerance. DC 6e-8; AC 9e-5; noise 1e-6 and 1e-5; two-tone
+    fundamental 3e-8 and IMD3 2e-6; filter and beamformer 9e-5; a delay at the noise frequency
+    2e-5; our transient against Spectre's harmonic balance, multiplier harmonics 4e-8 and 4e-7 and
+    mixer IF 2.5e-5; against its autonomous harmonic balance, oscillator frequency 5.5e-5 and
+    amplitude 4.2e-3. Spectre against the closed forms: 23 of 24 (spectre/compare_spectre.py);
+    the one difference is Spectre's own `tline` in `hbnoise`, which loses the delayed path.
+  * Why only "a" reference, stated where it is used: Spectre's phase noise for the
+    opto-electronic oscillator is 13 dB above the Yao-Maleki formula, and equals the formula with
+    the tank's group delay alone to 0.01 dB. hbnoise does apply absdelay at the noise frequency
+    (deck 29), so the simple explanation is ruled out; an untested inference about the periodic
+    adjoint's normalization remains. verilog-a-sim's transient noise is 5-8 dB above the formula,
+    also unexplained. Recorded as open by decision (paper_writing/mwp/README.md); no OEO phase
+    noise is validated. One Spectre deck (24) converged to the non-oscillating solution without an
+    error; the comparison script flags that case.
+  * Also found running Spectre: `$abstime` is invalid in its harmonic balance (mwp_laser with
+    df != 0, mwp_mll); a periodic source is refused in an autonomous analysis; its lin=N means N
+    steps, ours N points.
+  * Figures: `python paper_writing/mwp/tests/run_all.py` 152 of 152 checks over 12 tests, 418 s
+    (t12: 16 of 16, 33 s); no Rust code changed.
+
+
+2.55.0+2 - 2026-11-12
+---------------------
+**Roadmap: harmonic balance with periodic noise, proposed and assessed** (docs only; nothing
+built, nothing ratified). `docs/proposals/harmonic-balance.md`, a section in `docs/roadmap.md`
+(item 7 of "After 2.0") and a pointer in `docs/future_development.md` section 7.
+  * Why now: the microwave-photonics library needs four things no existing analysis gives
+    (oscillator phase noise, noise figure of a pumped circuit, intermodulation without a
+    beat-period transient, a delay holding 1e5 RF periods).
+  * The assessment: six steps, each with a gate taken from closed forms the `mwp` tests already
+    hold. Step 1 (driven, one tone) needs no interface change, because `ModelInstance::load`
+    already separates the resistive and charge channels. Steps 2 (linear delays per harmonic)
+    and 4 (periodic noise) each need an Interface beta addition. About 27-33 working days to a
+    simulated oscillator phase-noise spectrum. These are estimates made before any code.
+  * What stands in the way, stated in the proposal: it is outside CLAUDE.md section 1's analysis
+    list; QSPICE has no such analysis, so section 5's golden rule needs an explicit exception or
+    a second oracle; models with a `ddt` inside an expression or with state would be refused,
+    and how many compact models that excludes has not been counted.
+  * Figures: no code changed since 2.55.0+1 (`cargo test --workspace` 1059 passed; `cargo xtask
+    validate` 33/33; `run_all.py` 136 of 136); not re-run for this entry.
+
+
+2.55.0+1 - 2026-11-12
+---------------------
+**Microwave-photonics library: a time-domain noise module, a comparison with `--tran-noise`,
+paper figures, and an OEO phase-noise estimate** (`paper_writing/mwp/`; no simulator change).
+  * `lib/mwp_noise.va`: white current noise generated by the model itself, `$rdist_normal` on a
+    timer, samples joined by lines, fixed density. The in-language counterpart of 2.55.0.
+  * `tests/t11_transient_noise.py` runs the same circuits both ways. Measured: one RC over 4 us, variance against kT/C: module -5.5 %, simulator -1.2 % (about 3 % statistical);
+    time 10.6 s against 4.2 s, peak memory 60 MB against 45 MB. Fifty sources on an RC ladder: 118 s
+    against 39 s, 97 MB against 28 MB.
+    The module costs more because each instance is a device with a timer the integrator lands
+    on; it cannot follow the operating point (4.6 times too much noise at the low level of a
+    stepped optical power, with its density set for the high level).
+  * `tests/make_figures.py` -> `figures/`: ten figures (PDF and PNG) from the circuits of
+    t01-t09, transparent, no titles, 3.5 pt lines, each curve with its own line style and marker.
+  * `t04`: a phase-noise ESTIMATE for the oscillator, Yao and Maleki's delta/(2 pi f tau)^2 fed
+    with the simulated open-loop noise density and oscillation amplitude: -104 dBc/Hz at 100 kHz
+    for the 6.5 ns loop. Labelled an estimate in the test and the README; it is not a simulated
+    spectrum.
+  * `tests/mwp.py` now reports va-cli's peak memory (psutil).
+  * Polarization is not modelled anywhere in the library (one scalar envelope per bus); the
+    README says so.
+  * Figures: `python paper_writing/mwp/tests/run_all.py` 136 of 136 checks over 11 tests, 365 s.
+
+
+2.55.0 - 2026-11-12
+-------------------
+**Transient noise: `va-cli sim --tran --tran-noise <fmax>`** makes every white noise source a
+device declares (resistor thermal, shot, `white_noise()`) inject a random current in a
+transient run. `--tran-noise-seed <n>` picks the realization (default 1). Without the flag
+nothing changes.
+  * How (`va_transient::noise`): each instance is wrapped; at every evaluation the wrapper asks
+    it for its noise sources, as `.noise` does, and adds to the residual, per white source, a
+    current sqrt(S fmax) times a unit-normal sequence sampled every 1/(2 fmax) and joined by
+    straight lines. The time step is bounded to that interval. Spectrum: S sinc^4(f/(2 fmax)),
+    0.5 dB down at 0.26 fmax.
+  * Three design calls. (1) The samples are a hash of (seed, instance, source, sample index),
+    not a running generator: a rejected step or a Newton iteration sees the same waveform, a
+    run is reproducible by its seed, and no state is added. (2) Lines between samples, not
+    steps: no breakpoints are needed. (3) S is evaluated at the solution being tried, so shot
+    noise follows the current; the amplitude's dependence on the unknowns is left out of the
+    Jacobian (same converged point, a slightly inexact Newton step).
+  * No interface change: `ModelInstance::noise` and `StampSink` are used as they are.
+  * Left out: flicker and tabulated sources. A sequence of independent samples cannot have
+    their spectrum, and a filter with memory is not built. They contribute nothing and va-cli
+    says so (new W0602, with the count). A laser linewidth written as `flicker_noise(.., 2)` is
+    among them.
+  * Limits, stated in the help text and the module docs: one realization per run; not validated
+    against QSPICE (it has no such analysis here); with one step per sample the trapezoidal
+    rule keeps about 1/(1 + pi fc/(2 fmax)) of the noise variance behind a pole at fc, so fmax
+    should be 40 times the fastest pole that shapes the noise (measured: within 1.4 % of that
+    formula at 40 fc; about a quarter lost at 10 fc, more than the formula's 14 %).
+  * Measured (va-transient unit test, 1 kOhm on 1 pF, 4 us): variance within 10 % of kT/C;
+    the hashed deviates have mean 0, variance 1, fourth moment 3 and no correlation between
+    neighbours, sources or instances. Through the binary: reproducible by seed, different for
+    another seed, W0602 raised for a flicker source and not without the flag.
+  * Cost: a wrapped instance is evaluated for its noise at every load, about doubling the
+    evaluation cost of a compiled model. An oscillator's close-in phase noise is still out of
+    reach in practice: a 1 kHz offset needs about 1e9 steps.
+  * Figures: `cargo test --workspace` 1059 passed, 0 failed (six new); clippy and fmt clean.
+    `cargo xtask validate` 33 checked, 0 failed, convergence 33/33 (no gated deck uses the flag).
+
+
+2.54.0+1 - 2026-11-11
+---------------------
+**A Verilog-A component library for microwave photonics, validated on its applications**
+(`paper_writing/mwp/`; no simulator change). Fourteen models and ten tests, for the paper
+outlined in `paper_writing/microwavephotonics.txt`.
+  * Formalism: an optical port is the complex envelope on two electrical nodes (sqrt(mW)), plus
+    a carrier-tag node (THz) read by frequency-dependent parts. Electrical disciplines only, for
+    portability; that portability is not tested (only verilog-a-sim ran these).
+  * Models (`lib/mwp_*.va`): laser (RIN, linewidth), mode-locked laser (per-pulse jitter), phase
+    modulator, MZM with both outputs, IQ/dual-parallel MZM, coupler, switch, phase shifter, true
+    time delay, fibre (dispersion between carriers), microring, photodiode, balanced detector,
+    optical amplifier (ASE).
+  * Tests (`tests/t01..t10`, `run_all.py` -> `RESULTS.md`): IMDD link (IMD3, NF, SFDR), ring
+    filter, heterodyne and multiplied carriers 1-100 GHz, opto-electronic oscillator, 16-QAM and
+    LFM generation, optical sampling with jitter and demultiplexing, true-time-delay and
+    phase-shifter beamforming, mixers, in-band dispersion as an all-pass chain, amplifier noise.
+    Applications from Minasian, Chan and Yi (Opt. Express 21, 2013) where they can be modelled.
+  * Status: every check is against a closed form. No QSPICE gate exists for these models, so
+    this is showcase status. Two literature numbers are quoted, not reproduced (README).
+  * Limits found and stated in the README: no transient noise, so no oscillator phase noise; no
+    Brillouin element; time is printed with 7 significant digits, which is the error floor of
+    several checks (1.3e-4 rad of a 20 GHz carrier at 30 ns); a module with `exp()` of a
+    variable has its electrical nodes step-limited as junctions, which a 193 THz tag node on an
+    electrical net does not survive (`mwp_mll` uses `pow`).
+  * Figures: `python paper_writing/mwp/tests/run_all.py` 120 of 120 checks over 10 tests, 162 s. Same tree as 2.54.0: `cargo test --workspace` 1053 passed, 0 failed (two new); `cargo xtask validate` 33 checked, 0 failed, convergence 33/33; clippy and fmt clean. The three entries of this date were measured once, on this final tree.
+
+
 2.54.0 - 2026-11-11
 -------------------
 **`VA_ABSDELAY_POINTS=<n>` sets the size of `absdelay`'s transient history** (default 512, as

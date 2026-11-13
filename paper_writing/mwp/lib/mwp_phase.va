@@ -1,0 +1,23 @@
+// mwp_phase -- optical phase shifter and attenuator.
+//
+//   A_out = sqrt(il) * A_in * exp(j * (phi0 + kphi * V(ctl)))
+//
+// A heater, a carrier-injection section or a variable attenuator (kphi = 0), without dynamics:
+// put an RC in front of `ctl` for a thermal time constant.
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_phase(i_re, i_im, o_re, o_im, ctl);
+    input i_re, i_im, ctl;
+    output o_re, o_im;
+    electrical i_re, i_im, o_re, o_im, ctl;
+    parameter real phi0  = 0.0;                        // static phase, rad
+    parameter real kphi  = 0.0;                        // phase per control volt, rad/V
+    parameter real il_db = 0.0 from [0:inf);           // loss, dB
+    real th, g;
+    analog begin
+        th = phi0 + kphi * V(ctl);
+        g  = pow(10.0, -il_db / 20.0);
+        V(o_re) <+ g * (V(i_re) * cos(th) - V(i_im) * sin(th));
+        V(o_im) <+ g * (V(i_re) * sin(th) + V(i_im) * cos(th));
+    end
+endmodule

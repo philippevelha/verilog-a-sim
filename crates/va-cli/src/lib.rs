@@ -129,6 +129,24 @@ pub fn set_bypass(cfg: Option<va_transient::integrator::BypassConfig>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg;
 }
 
+/// Transient noise for every transient run from here on (2.55.0): each device's white noise
+/// sources become random currents (`va_transient::noise`). `va-cli sim --tran-noise` calls it.
+/// `None`, the default, is a noiseless transient, as before.
+pub fn set_tran_noise(cfg: Option<va_transient::noise::TranNoiseConfig>) {
+    *TRAN_NOISE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg;
+}
+
+static TRAN_NOISE: std::sync::Mutex<Option<va_transient::noise::TranNoiseConfig>> =
+    std::sync::Mutex::new(None);
+
+fn tran_noise() -> Option<va_transient::noise::TranNoiseConfig> {
+    *TRAN_NOISE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 static BYPASS: std::sync::Mutex<Option<va_transient::integrator::BypassConfig>> =
     std::sync::Mutex::new(None);
 
@@ -2994,6 +3012,34 @@ fn solve_transient_impl(
                      instead",
             )?;
         op.x
+    };
+
+    // Transient noise (2.55.0): the operating point above is solved without it; from here on
+    // every instance is wrapped so that its white sources inject their currents.
+    let noisy: Vec<va_transient::noise::WithTranNoise> = match tran_noise() {
+        Some(ncfg) => {
+            let left_out = va_transient::noise::excluded_sources(
+                &refs,
+                &x0,
+                &va_abi::AnalysisCtx::transient(0.0),
+            );
+            if !left_out.is_empty() {
+                let diag = va_diag::Diagnostic::new(va_diag::codes::W0602)
+                    .arg("sources", left_out.iter().map(|&(_, n)| n).sum::<usize>())
+                    .arg("devices", left_out.len());
+                eprintln!("[va-cli] {diag}");
+            }
+            refs.iter()
+                .enumerate()
+                .map(|(i, r)| va_transient::noise::WithTranNoise::new(*r, i as u64, ncfg))
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    let refs: Vec<&dyn ModelInstance> = if noisy.is_empty() {
+        refs
+    } else {
+        noisy.iter().map(|n| n as &dyn ModelInstance).collect()
     };
 
     let events = va_transient::events::EventQueue::new();

@@ -1,0 +1,48 @@
+// mwp_mll -- mode-locked laser as a train of transform-limited Gaussian pulses.
+//
+//   P(t) = Ppk * exp(-4 ln2 * tau^2 / fwhm^2),  tau = time from the nearest pulse centre
+//   Ppk  = pavg_mw / (frep * fwhm * 1.0644670)  (so the average power is pavg_mw)
+//   pulse k is centred at t0 + k/frep + dj_k
+//
+// Timing jitter: with jit > 0 each pulse is displaced by an independent normal deviate of
+// standard deviation `jit` (seconds), drawn 5 FWHM before the pulse. That is white period
+// jitter sampled pulse by pulse, not an integrated phase-noise spectrum. No amplitude noise,
+// no chirp, no carrier-envelope phase slip.
+// A timer lands a time point 5 FWHM before every pulse and the step is bounded to fwhm/spp
+// within 5.5 FWHM of its centre (wider than the timer's lead, so the bound is in force at the
+// timer's own point whatever the rounding).
+`include "disciplines.vams"
+`include "mwp.vams"
+module mwp_mll(o_re, o_im, nu);
+    output o_re, o_im, nu;
+    electrical o_re, o_im, nu;
+    parameter real pavg_mw = 1.0     from [0:inf);     // average power, mW
+    parameter real frep    = 1.0e9   from (0:inf);     // repetition rate, Hz
+    parameter real fwhm    = 5.0e-12 from (0:inf);     // intensity FWHM, s
+    parameter real t0      = 0.5e-9;                   // centre of pulse 0, s
+    parameter real nu0     = 193.4   from (0:inf);     // carrier tag, THz
+    parameter real jit     = 0.0     from [0:inf);     // rms timing jitter per pulse, s
+    parameter integer seed0 = 1;                       // random seed
+    parameter real spp     = 12.0    from [4:inf);     // time steps per FWHM inside a pulse
+    integer seed;
+    real dj, tr, tau, ppk;
+    analog begin
+        @(initial_step) begin
+            seed = seed0;
+            dj = 0.0;
+        end
+        tr = 1.0 / frep;
+        @(timer(t0 - 5.0 * fwhm, tr))
+            dj = (jit > 0.0) ? $rdist_normal(seed, 0.0, jit) : 0.0;
+        tau = $abstime - t0 - tr * floor(($abstime - t0) / tr + 0.5) - dj;
+        ppk = pavg_mw / (frep * fwhm * 1.0644670194312262);
+        // exp(-2 ln2 tau^2/fwhm^2), written as a power of 4: verilog-a-sim limits the Newton
+        // step on every electrical node of a module holding an exp() of a variable (it takes
+        // them for junctions), and the tag node has to reach 193 "volts".
+        V(o_re) <+ sqrt(ppk) * pow(4.0, -tau * tau / (fwhm * fwhm));
+        V(o_im) <+ 0.0;
+        V(nu)   <+ nu0;
+        if (abs(tau) < 5.5 * fwhm)
+            $bound_step(fwhm / spp);
+    end
+endmodule

@@ -1,0 +1,21 @@
+// 21 -- carrier-suppressed dual-parallel MZM mixer, RF 10 GHz, LO 9.92 GHz: IF at 80 MHz = R P J1 J1 (t08),
+//       then the noise at the IF (no closed form in the tests yet: this is the reference stage 4 of the proposal needs)
+// STAGE 2: hb/hbnoise parameter names checked against the help text of SPECTRE 24.10.078 (funds, fundfreqs,
+// maxharms, tstab, maxsideband, noisetype, noiseout). Not yet run.
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+X1 (a_re a_im nu) mwp_laser p_mw=10 rin=3.1622776601683794e-16
+Vrf (rf 0) vsource type=sine ampl=0.2 freq=10e9 fundname="frf"
+Vlo (lo 0) vsource type=sine ampl=1.5 freq=9.92e9 fundname="flo"
+Vn (vn 0) vsource dc=4
+Vp (vp 0) vsource dc=0
+X2 (a_re a_im c_re c_im lo rf vn vn vp) mwp_iqm vpi=4
+Vk (k 0) vsource dc=3
+X4 (c_re c_im an k) mwp_pd resp=0.8
+RL (an 0) resistor r=50
+save an
+hb1 hb funds=["flo" "frf"] maxharms=[7 3] errpreset=conservative
+hbn (an 0) hbnoise start=1e6 stop=1e9 dec=5 maxsideband=7

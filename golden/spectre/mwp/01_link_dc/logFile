@@ -1,0 +1,36 @@
+HEADER
+"PSFversion" "1.00"
+"Log Generator" "drlLog rev. 1.0"
+"Log Time Stamp" "Thu Nov 12 16:59:13 2026"
+"psfversion" "1.4.0"
+"simulator" "spectre"
+"version" "24.1.0.078"
+"date" "4:59:13 PM, Thur Nov 12, 2026"
+"design" "// 01 -- IMDD link, DC transfer curve against cos^2 (t01 a)"
+"signalNameType" "spectre"
+"simMode" "Spectre"
+"measdgt" 0
+"ingold" 2
+"sst2usecolon" 0
+TYPE
+"analysisInst" STRUCT(
+"analysisType" STRING *
+"dataFile" STRING *
+"format" STRING *
+"parent" STRING *
+"sweepVariable" ARRAY ( * ) STRING *
+"description" STRING *
+)
+VALUE
+"sw-dc" "analysisInst" (
+"dc"
+"sw.dc"
+"PSF"
+""
+("dc")
+"DC Analysis `sw': Vb:dc = (0 V -> 8 V)"
+) PROP(
+"data_type" "scalar"
+)
+
+END

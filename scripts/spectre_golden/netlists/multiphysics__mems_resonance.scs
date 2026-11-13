@@ -1,0 +1,21 @@
+// multiphysics__mems_resonance -- Spectre translation of circuits/multiphysics/mems_resonance.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/mems/mems_parts.va"
+
+V1 (drv 0) vsource dc=3 mag=1 phase=0
+XE1 (drv 0 xlo) es_gap area=1e-08 g0=2e-06 td=1e-07 er=7.5
+XK1 (xlo) spring k=1
+XM1 (xlo) proof_mass m=2.53e-10
+XS1 (xlo) squeeze_film pressure=1
+XT1 (xlo) thermoelastic
+XE2 (drv 0 xhi) es_gap area=1e-08 g0=2e-06 td=1e-07 er=7.5
+XK2 (xhi) spring k=1
+XM2 (xhi) proof_mass m=2.53e-10
+XS2 (xhi) squeeze_film pressure=100
+XT2 (xhi) thermoelastic
+
+save xlo xhi
+ac1 ac start=8410 stop=10410 lin=4000

@@ -1,0 +1,35 @@
+// multiphysics__ringchaos_bank -- Spectre translation of circuits/multiphysics/ringchaos_bank.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/ringchaos/rc_parts.va"
+
+VW (wctl 0) vsource dc=1550.155016
+VP1 (p1 0) vsource dc=0 type=pwl wave=[ \
+    0 0 2e-08 7 ]
+VP2 (p2 0) vsource dc=0 type=pwl wave=[ \
+    0 0 2e-08 7.000000007 ]
+VP3 (p3 0) vsource dc=0 type=pwl wave=[ \
+    0 0 2e-08 7 ]
+VP4 (p4 0) vsource dc=0 type=pwl wave=[ \
+    0 0 2e-08 7.000000007 ]
+XL1 (p1 wctl a0r a0i wl1) laser
+XA1 (a0r a0i a1r a1i wl1 ta1) siring
+XB1 (a1r a1i a2r a2i wl1 tb1) siring
+XD1 (a2r a2i o1) detector
+XL2 (p2 wctl b0r b0i wl2) laser
+XA2 (b0r b0i b1r b1i wl2 ta2) siring
+XB2 (b1r b1i b2r b2i wl2 tb2) siring
+XD2 (b2r b2i o2) detector
+XL3 (p3 wctl c0r c0i wl3) laser
+XA3 (c0r c0i c1r c1i wl3 ta3) siring
+XB3 (c1r c1i c2r c2i wl3 tb3) siring tth=2.6e-07
+XD3 (c2r c2i o3) detector
+XL4 (p4 wctl d0r d0i wl4) laser
+XA4 (d0r d0i d1r d1i wl4 ta4) siring
+XB4 (d1r d1i d2r d2i wl4 tb4) siring tth=2.6e-07
+XD4 (d2r d2i o4) detector
+
+save o1 o2 o3 o4
+tr tran stop=6e-05 step=2e-10

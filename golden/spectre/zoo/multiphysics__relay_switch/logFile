@@ -1,0 +1,36 @@
+HEADER
+"PSFversion" "1.00"
+"Log Generator" "drlLog rev. 1.0"
+"Log Time Stamp" "Fri Nov 13 09:54:24 2026"
+"psfversion" "1.4.0"
+"simulator" "spectre"
+"version" "24.1.0.078"
+"date" "9:54:24 AM, Fri Nov 13, 2026"
+"design" "// multiphysics__relay_switch -- Spectre translation of circuits/multiphysics/relay_switch.net (scripts/spectre_golden/net2spectre.py)"
+"signalNameType" "spectre"
+"simMode" "Spectre"
+"measdgt" 0
+"ingold" 2
+"sst2usecolon" 0
+TYPE
+"analysisInst" STRUCT(
+"analysisType" STRING *
+"dataFile" STRING *
+"format" STRING *
+"parent" STRING *
+"sweepVariable" ARRAY ( * ) STRING *
+"description" STRING *
+)
+VALUE
+"tr-tran" "analysisInst" (
+"tran"
+"tr.tran.tran"
+"PSF"
+""
+("time")
+"Transient Analysis `tr': time = (0 s -> 3 s)"
+) PROP(
+"data_type" "swept_scalar"
+)
+
+END

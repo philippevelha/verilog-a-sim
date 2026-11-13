@@ -1,0 +1,15 @@
+// multiphysics__piezo_duffing -- Spectre translation of circuits/multiphysics/piezo_duffing.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "models/multiphysics/piezo/piezo_parts.va"
+
+XS (acc) chirp amp=2 f0=48 f1=56 tsw=40
+X1 (acc p1 0) piezo_beam
+R1 (p1 0) resistor r=63662
+X2 (acc p2 0) piezo_beam k3=200000000
+R2 (p2 0) resistor r=63662
+
+save X1.x X2.x
+tr tran stop=80 step=0.0001

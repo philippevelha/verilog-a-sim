@@ -1,0 +1,103 @@
+{
+ "test": "t10_optical_amplifier",
+ "ok": true,
+ "wall_s": 0.66,
+ "rows": [
+  {
+   "what": "P_in -30 dBm: gain",
+   "sim": 19.9563519459755,
+   "ref": 19.956786262173573,
+   "err": 0.00043431619807421384,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "what": "P_in -20 dBm: gain",
+   "sim": 19.586116577648795,
+   "ref": 19.58607314841775,
+   "err": 4.3429231045166716e-05,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "what": "P_in -10 dBm: gain",
+   "sim": 16.989700043360187,
+   "ref": 16.989700043360187,
+   "err": 0.0,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "what": "P_in +0 dBm: gain",
+   "sim": 9.58606880547076,
+   "ref": 9.58607314841775,
+   "err": 4.342946990476548e-06,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "what": "P_in +10 dBm: gain",
+   "sim": -0.04320939488377827,
+   "ref": -0.043213737826425784,
+   "err": 4.3429426475130595e-06,
+   "tol": 0.002,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "what": "P_in -30 dBm: output noise (signal-spontaneous + shot + load thermal)",
+   "sim": 1.347603e-17,
+   "ref": 1.3476034314973369e-17,
+   "err": 3.201960804845264e-07,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "what": "P_in -30 dBm: noise figure recovered from the simulated noise, 2 n_sp (G-1)/G + 1/G",
+   "sim": 4.969901660302021,
+   "ref": 4.9699031447072,
+   "err": 1.48440517921955e-06,
+   "tol": 0.001,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "note": "  signal-spontaneous 5.034e-21, shot 2.538e-23, thermal 3.315e-22 A^2/Hz at G = 20.0 dB"
+  },
+  {
+   "what": "P_in -10 dBm: output noise (signal-spontaneous + shot + load thermal)",
+   "sim": 3.217415e-16,
+   "ref": 3.2174145768355355e-16,
+   "err": 1.3152313898582155e-07,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "what": "P_in -10 dBm: noise figure recovered from the simulated noise, 2 n_sp (G-1)/G + 1/G",
+   "sim": 4.940199028325705,
+   "ref": 4.9401984535860795,
+   "err": 5.747396256694515e-07,
+   "tol": 0.001,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "note": "  signal-spontaneous 1.271e-19, shot 1.282e-21, thermal 3.315e-22 A^2/Hz at G = 17.0 dB"
+  }
+ ]
+}

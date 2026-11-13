@@ -1,0 +1,205 @@
+{
+ "test": "t11_transient_noise",
+ "ok": true,
+ "wall_s": 197.4,
+ "rows": [
+  {
+   "what": "LIB: variance on the capacitor against kT/C (4000 time constants: +-3 % statistical)",
+   "sim": 3.915973972184289e-09,
+   "ref": 4.144017973500001e-09,
+   "err": 0.05502968442077182,
+   "tol": 0.1,
+   "rel": true,
+   "unit": "V^2",
+   "ok": true
+  },
+  {
+   "what": "LIB: spectrum around 20 MHz against 4kTR/(1+(f/fc)^2) sinc^4(f dt)",
+   "sim": 1.4503612348736098e-17,
+   "ref": 1.6330117245237915e-17,
+   "err": 0.11184885381239076,
+   "tol": 0.15,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "what": "LIB: spectrum around 159 MHz against 4kTR/(1+(f/fc)^2) sinc^4(f dt)",
+   "sim": 7.125752842179202e-18,
+   "ref": 7.998980197597295e-18,
+   "err": 0.10916733556615005,
+   "tol": 0.15,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "what": "LIB: spectrum around 1000 MHz against 4kTR/(1+(f/fc)^2) sinc^4(f dt)",
+   "sim": 4.012713569940752e-19,
+   "ref": 4.107658251784271e-19,
+   "err": 0.023114065490301504,
+   "tol": 0.15,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "what": "LIB: spectrum around 4000 MHz against 4kTR/(1+(f/fc)^2) sinc^4(f dt)",
+   "sim": 2.354326200870832e-20,
+   "ref": 2.4567334118973227e-20,
+   "err": 0.04168429937516181,
+   "tol": 0.15,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "note": "LIB, 1 source: 10.4 s, 999664 points, peak memory 60 MB"
+  },
+  {
+   "what": "SIM: variance on the capacitor against kT/C (4000 time constants: +-3 % statistical)",
+   "sim": 4.0951856519958405e-09,
+   "ref": 4.144017973500001e-09,
+   "err": 0.011783810257684981,
+   "tol": 0.1,
+   "rel": true,
+   "unit": "V^2",
+   "ok": true
+  },
+  {
+   "what": "SIM: spectrum around 20 MHz against 4kTR/(1+(f/fc)^2) sinc^4(f dt)",
+   "sim": 1.5604345282743323e-17,
+   "ref": 1.6330117245237915e-17,
+   "err": 0.044443769239087196,
+   "tol": 0.15,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "what": "SIM: spectrum around 159 MHz against 4kTR/(1+(f/fc)^2) sinc^4(f dt)",
+   "sim": 7.76262882062707e-18,
+   "ref": 7.998980197597295e-18,
+   "err": 0.02954768872177223,
+   "tol": 0.15,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "what": "SIM: spectrum around 1000 MHz against 4kTR/(1+(f/fc)^2) sinc^4(f dt)",
+   "sim": 4.1107443828377017e-19,
+   "ref": 4.107658251784271e-19,
+   "err": 0.0007513115415797204,
+   "tol": 0.15,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "what": "SIM: spectrum around 4000 MHz against 4kTR/(1+(f/fc)^2) sinc^4(f dt)",
+   "sim": 2.4285417652576788e-20,
+   "ref": 2.4567334118973227e-20,
+   "err": 0.011475256738528915,
+   "tol": 0.15,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "note": "SIM, 1 source: 4.7 s, 723385 points, peak memory 45 MB"
+  },
+  {
+   "what": "LIB, 50-section ladder: variance at the last node against kT/C (equipartition)",
+   "sim": 3.6245375790823667e-09,
+   "ref": 4.144017973500001e-09,
+   "err": 0.12535669433375682,
+   "tol": 0.35,
+   "rel": true,
+   "unit": "V^2",
+   "ok": true
+  },
+  {
+   "note": "LIB, 50 sources: 129.3 s, 439311 points, peak memory 97 MB"
+  },
+  {
+   "what": "SIM, 50-section ladder: variance at the last node against kT/C (equipartition)",
+   "sim": 3.974476121333057e-09,
+   "ref": 4.144017973500001e-09,
+   "err": 0.04091243166683237,
+   "tol": 0.35,
+   "rel": true,
+   "unit": "V^2",
+   "ok": true
+  },
+  {
+   "note": "SIM, 50 sources: 34.4 s, 397674 points, peak memory 28 MB"
+  },
+  {
+   "note": "cost, LIB / SIM: 1 source(s): time x2.2, points x1.4, memory x1.31; 50 source(s): time x3.8, points x1.1, memory x3.46"
+  },
+  {
+   "what": "SIM: noise variance at the high level, kT/C + 2 q I R/(4C), with the step factor 0.96",
+   "sim": 4.91816002083023e-09,
+   "ref": 4.985219421038594e-09,
+   "err": 0.013451644660887023,
+   "tol": 0.1,
+   "rel": true,
+   "unit": "V^2",
+   "ok": true
+  },
+  {
+   "what": "SIM: noise variance at the low level",
+   "sim": 1.1039991935338604e-09,
+   "ref": 1.1106637903525966e-09,
+   "err": 0.006000552891546467,
+   "tol": 0.1,
+   "rel": true,
+   "unit": "V^2",
+   "ok": true
+  },
+  {
+   "note": "SIM: shot part high / low = 9.42 (current ratio 9)"
+  },
+  {
+   "what": "LIB (two modules: load thermal, and shot at the high level's density): variance at the high level",
+   "sim": 4.8072819706598435e-09,
+   "ref": 4.985219421038594e-09,
+   "err": 0.0356930027247787,
+   "tol": 0.1,
+   "rel": true,
+   "unit": "V^2",
+   "ok": true
+  },
+  {
+   "note": "LIB at the low level: 4.6 times the noise that level has (the module's density is a parameter; it does not follow the current)"
+  },
+  {
+   "note": "(c) cost: SIM 4.3 s, 15 MB; LIB 6.2 s, 20 MB"
+  }
+ ],
+ "data": {
+  "cost": {
+   "LIB_1": {
+    "wall_s": 10.400636672973633,
+    "peak_mb": 59.82421875,
+    "points": 999664
+   },
+   "SIM_1": {
+    "wall_s": 4.656639814376831,
+    "peak_mb": 45.49609375,
+    "points": 723385
+   },
+   "LIB_50": {
+    "wall_s": 129.3336341381073,
+    "peak_mb": 96.9609375,
+    "points": 439311
+   },
+   "SIM_50": {
+    "wall_s": 34.36298131942749,
+    "peak_mb": 28.0,
+    "points": 397674
+   }
+  }
+ }
+}

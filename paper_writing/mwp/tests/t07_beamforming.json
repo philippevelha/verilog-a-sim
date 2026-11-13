@@ -1,0 +1,192 @@
+{
+ "test": "t07_beamforming",
+ "ok": true,
+ "wall_s": 2.79,
+ "rows": [
+  {
+   "what": "element responses 2-20 GHz: max |H - closed form| / |H| (phase printed to 0.01 deg)",
+   "sim": 8.681859008531765e-05,
+   "ref": 0.0,
+   "err": 8.681859008531765e-05,
+   "tol": 0.0003,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "element delay steps -12.502, -12.489, -12.476 ps (carriers equally spaced in frequency, not wavelength)"
+  },
+  {
+   "what": "element 1: delay against element 0 from the phase slope",
+   "sim": -1.250188346240978e-11,
+   "ref": -1.2501866770207501e-11,
+   "err": 1.669220227978778e-17,
+   "tol": 5e-15,
+   "rel": false,
+   "unit": "s",
+   "ok": true
+  },
+  {
+   "what": "element 2: delay against element 0 from the phase slope",
+   "sim": -2.4990872451398766e-11,
+   "ref": -2.499081838879203e-11,
+   "err": 5.4062606737103523e-17,
+   "tol": 5e-15,
+   "rel": false,
+   "unit": "s",
+   "ok": true
+  },
+  {
+   "what": "element 3: delay against element 0 from the phase slope",
+   "sim": -3.746696696696697e-11,
+   "ref": -3.746687485857477e-11,
+   "err": 9.210839219791491e-17,
+   "tol": 5e-15,
+   "rel": false,
+   "unit": "s",
+   "ok": true
+  },
+  {
+   "what": "true-time delay: pointing angle at 8, 12, 16, 20 GHz -- largest deviation from asin(c dtau / d)",
+   "sim": 0.02078374318927345,
+   "ref": 0.0,
+   "err": 0.02078374318927345,
+   "tol": 0.1,
+   "rel": false,
+   "unit": "deg",
+   "ok": true
+  },
+  {
+   "note": "TTD beam at -29.95, -29.95, -29.95, -29.95 deg (8, 12, 16, 20 GHz); design -29.97 deg"
+  },
+  {
+   "what": "RF phase = -(optical phase), 45..315 deg, 2-20 GHz: largest deviation",
+   "sim": 1.59384302056817e-14,
+   "ref": 0.0,
+   "err": 1.59384302056817e-14,
+   "tol": 0.03,
+   "rel": false,
+   "unit": "deg",
+   "ok": true
+  },
+  {
+   "what": "RF amplitude change over the 360 deg range and 2-20 GHz",
+   "sim": 2.220446049250313e-16,
+   "ref": 0.0,
+   "err": 2.220446049250313e-16,
+   "tol": 1e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "phase-shifter response magnitude",
+   "sim": 0.0003141593,
+   "ref": 0.0003141592653589793,
+   "err": 1.1026579351044808e-07,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A/V",
+   "ok": true
+  },
+  {
+   "what": "phase-shifter beamformer: squint follows asin(sin(th0) f0/f), largest deviation",
+   "sim": 0.02078374318927345,
+   "ref": 0.0,
+   "err": 0.02078374318927345,
+   "tol": 0.1,
+   "rel": false,
+   "unit": "deg",
+   "ok": true
+  },
+  {
+   "note": "phase-shifter beam at -48.55, -29.95, -22.00, -17.45 deg (8, 12, 16, 20 GHz): -31.1 deg of squint; TTD 0.00 deg"
+  },
+  {
+   "what": "code 000: delay",
+   "sim": 5.403414623379324e-43,
+   "ref": 0.0,
+   "err": 5.403414623379324e-43,
+   "tol": 5e-15,
+   "rel": false,
+   "unit": "s",
+   "ok": true
+  },
+  {
+   "what": "code 000: RF amplitude / through value, largest deviation",
+   "sim": 4.8889149617536987e-08,
+   "ref": 0.0,
+   "err": 4.8889149617536987e-08,
+   "tol": 1e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "code 101: delay",
+   "sim": 5.0000000000000015e-11,
+   "ref": 4.9999999999999995e-11,
+   "err": 1.9387045606711586e-26,
+   "tol": 5e-15,
+   "rel": false,
+   "unit": "s",
+   "ok": true
+  },
+  {
+   "what": "code 101: RF amplitude / through value, largest deviation",
+   "sim": 4.888914983958159e-08,
+   "ref": 0.0,
+   "err": 4.888914983958159e-08,
+   "tol": 1e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "code 111: delay",
+   "sim": 6.999999999999998e-11,
+   "ref": 6.999999999999999e-11,
+   "err": 1.2924697071141057e-26,
+   "tol": 5e-15,
+   "rel": false,
+   "unit": "s",
+   "ok": true
+  },
+  {
+   "what": "code 111: RF amplitude / through value, largest deviation",
+   "sim": 4.888914983958159e-08,
+   "ref": 0.0,
+   "err": 4.888914983958159e-08,
+   "tol": 1e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "all 8 codes checked; three printed"
+  },
+  {
+   "what": "ring all-pass: RF response = -S0 exp(-2j atan(2 pi f tau)), max deviation / S0",
+   "sim": 8.585974942039817e-05,
+   "ref": 0.0,
+   "err": 8.585974942039817e-05,
+   "tol": 0.0003,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "ring all-pass: low-frequency RF delay = 2 tau = 4 Q / omega",
+   "sim": 6.583333333333367e-11,
+   "ref": 6.583451627379331e-11,
+   "err": 1.7968392973599345e-05,
+   "tol": 0.002,
+   "rel": true,
+   "unit": "s",
+   "ok": true
+  },
+  {
+   "note": "delay 65.8 ps; within 1 % up to 0.89 GHz (closed form 0.173/(2 pi tau) = 0.84 GHz): delay x bandwidth = 0.059, fixed by the single resonance"
+  }
+ ]
+}

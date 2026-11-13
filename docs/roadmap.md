@@ -5038,9 +5038,105 @@ to choose, as 2.0's was, and the list below is evidence for that choice, not a p
    or the gate says so. It covers the committed decks only, and the slow ISCAS'85 decks except
    c432 `.op` and c17's transient are not in it.
 
+7. **Harmonic balance with periodic noise** (added 2026-11-12; proposed, **not ratified**).
+   The next section and `docs/proposals/harmonic-balance.md`.
+8. **Displacement current in `I(<port>)` and the branch self-probe** (added 2026-11-13; a
+   correctness fix, **to do**). The section "Displacement current in the current probes" below.
+
 Also still open from before 2.0, in `docs/future_development.md`: a results file, `absdelay` in
 transient (**done in 2.44.0**, constant delay only), Interface β changes (seeded RNG, sensitivities),
-GPU, PSS/HB, a Python binding.
+GPU, PSS/HB (now item 7 above), a Python binding.
+
+## Harmonic balance with periodic noise — proposed, not ratified (2026-11-12)
+
+**Why it is here.** The microwave-photonics library (`paper_writing/mwp`, 2.54.0+1 to 2.55.0+1)
+reached four things the existing analyses cannot give: an oscillator's phase noise (the
+opto-electronic oscillator has a formula-based estimate only), the noise figure of a mixer or a
+sampler (`.noise` linearizes about a DC point), intermodulation without a transient over the
+beat period, and a loop holding more RF periods than `absdelay`'s history can (a kilometre of
+fibre). Transient noise (2.55.0) covers none of them at close-in offsets: a 1 kHz offset needs
+about 1e9 steps. Harmonic balance covers all four.
+
+**Why it is not simply started.** It is a fifth and a sixth analysis, outside `CLAUDE.md` §1's
+list; QSPICE has neither (Spectre, adopted as a second oracle on 2026-11-12, has both); and two
+of its steps change Interface β.
+Each of those is a decision, not an implementation detail.
+
+**The steps**, assessed in `docs/proposals/harmonic-balance.md` (estimates, made before any code):
+
+| Step | What | Gate (closed forms the `mwp` tests already hold) | Estimate | Needs |
+|---|---|---|---|---|
+| 0 | Ratify scope, home crate, oracle | — | a decision | the author |
+| 1 | Driven, one tone; devices that are memoryless plus whole charge terms; others refused | multiplier harmonics `R·P·J_2k(m)`, rectifier against a long transient | 8–10 days | nothing new: `ModelInstance::load` is already the interface |
+| 2 | Linear delays and filters, exact per harmonic | beamformer phases, ring filter | 5 days | Interface β (a context kind) |
+| 3 | Autonomous: the oscillator's frequency as an unknown | OEO frequency and amplitude against the loop equation, 5 ns and 5 µs loops | 6–8 days | step 2 |
+| 4 | Periodic small-signal and noise; phase noise `L(f)` | mixer noise figure; OEO `L(f)` against Yao–Maleki (−104.0 dBc/Hz at 100 kHz, from `t04`) | 8–10 days | Interface β (a noise-context field) |
+| 5 | Two tones | IMD3 `R·P·J1·J2`, mixer IF | 6–8 days | step 1 only |
+| 6 | Matrix-free solve for large circuits | — | not estimated | only if a circuit asks |
+
+Steps 0–4, the path to a simulated OEO phase-noise spectrum: about 27–33 working days. Step 1
+is the calibration of every other number in the table and the first point with something
+usable; step 3 is the least predictable.
+
+**What would be refused, by construction:** a model that evaluates a `ddt` inside an expression,
+or keeps anything on the state channel (`transition`, `slew`, `idt`, events, `$rdist_*`,
+`absdelay` or `laplace_*` on a nonlinear argument). How much of the compact-model corpus that
+excludes has not been counted, and must be before step 1 is called done.
+
+**Oracle (2026-11-12):** Cadence Spectre, `golden/spectre/`. Its harmonic balance and periodic
+noise reproduce the driven gates of steps 1, 4 and 5 (multiplier, mixer IF, mixer noise). **Step 4's
+oscillator gate is open:** Spectre's phase noise for the opto-electronic oscillator is 13 dB above
+the Yao–Maleki formula and the cause is not settled (`paper_writing/mwp/spectre/README.md`), so it
+cannot serve as that gate; the formula and an independent check have to.
+
+**Status:** nothing built. Waiting on step 0.
+
+## Displacement current in the current probes — to do (2026-11-13)
+
+**The defect.** In a transient run, `I(<port>)` (LRM §5.4.3) and the self-probe of a named branch
+`I(br)` report the **conduction current only**: every `ddt` term of the contributions they sum is
+dropped (`va-frontend`'s `resistive_terms_only`, `va-codegen`'s `FlowCurrentAccumulator`). This
+was a deliberate, documented approximation on 2026-08-29 (section "`I(<port>)` no longer
+manufactures a nested `ddt`" above): exact at a DC operating point, where every `ddt` is zero,
+wrong in transient by the whole displacement current.
+
+**Why now.** Spectre, adopted as a golden reference on 2026-11-12, reports the total current, and
+the four gates built for this fix on 2026-08-29 disagree with it by the full capacitive term
+(`golden/spectre/zoo/README.md`): `portprobe_ramp`, `portprobe_sq`, `selfprobe_ramp` (RMS
+difference 34–57 % of the swing; Spectre against `V/r + C·dV/dt` 2e-4, ours equals `V/r` to
+4e-7) and `nlcap_ramp` (the bias-dependent `(c0 + c1·V)·ddt(V)` case, 30 %). And verilog-a-sim
+gives **no warning** when the approximation applies — the silent wrong number `CLAUDE.md` §5
+rules out.
+
+**The premise that blocked it has expired** (the expired-premise rule, 2026-09-06). The
+2026-08-29 entry says evaluating `dQ/dt` "needs the integrator's per-term time-stepping
+coefficient exposed through Interface β". That channel now exists: `AnalysisCtx::ddt_coeff`,
+`ddt_prev_rate_weight` and `ddt_prev2_weight` (2026-08-31, the rate reconstruction), with which
+`va-codegen` already evaluates a `ddt` inside an expression (`Lowered::evaluates_ddt`, the
+product rule). So the fix is expected to be local to `va-frontend` and `va-codegen`, with no
+§6 change — **to be confirmed by reading those paths, not assumed**.
+
+**The work, in order:**
+
+1. **Stop the silence first** (small, independent): when a transient run evaluates `I(<port>)` or
+   `I(br)` on a branch with a dropped charge term, warn, naming the module, the probe and that the
+   displacement current is missing — or refuse, as transient refuses other approximations
+   (2026-09-06, "Transient refuses folded operators"). Refusing is the project's rule for a
+   wrong number; warning keeps the HICUM/`CALC_OP` corpus reads (operating-point outputs, exact)
+   usable. Decide which.
+2. **Keep the charge terms in the probe** and evaluate them through the rate reconstruction, as an
+   in-expression `ddt` already is. Both spellings must agree: a `ddt` written in the contribution
+   and one reaching it through a variable (the `ddt_tainted_vars` / `Taint` twins).
+3. **Gates:** the four decks above against their Spectre golden outputs (RMS ≤ 1e-3 of the swing,
+   `scripts/spectre_golden/compare_zoo.py`), `portprobe_ac` and `portprobe_dc` unchanged, and the
+   QSPICE references of 2026-08-29 (`golden/qspice/README.md`). An AD test of the probe's
+   Jacobian against central differences (`CLAUDE.md` §5).
+4. **Re-check the corpus:** the six files unblocked on 2026-08-29 (HICUM L0/L2 and others) read
+   `I(<b>)` in `` `ifdef CALC_OP `` blocks; they must keep building, and their operating-point
+   outputs must not move.
+
+**Not in scope:** `I(<port>)` inside a `case` arm or a loop, and vector ports (open items listed
+above, unchanged).
 
 ## How to keep this document honest
 

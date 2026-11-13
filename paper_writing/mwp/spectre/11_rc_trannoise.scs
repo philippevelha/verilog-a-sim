@@ -1,0 +1,10 @@
+// 11 -- resistor thermal noise on a capacitor with Spectre's own transient noise: kT/C (t11 a)
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+R1 (out 0) resistor r=1000
+C1 (out 0) capacitor c=1e-12
+save out
+tr tran stop=4e-6 maxstep=25e-12 noisefmax=20e9 noiseseed=1

@@ -1,0 +1,171 @@
+HEADER
+"PSFversion" "1.00"
+"simulator" "spectre"
+"version" "24.1.0.078"
+"date" "4:38:38 PM, Thur Nov 12, 2026"
+"design" "// 20 -- MZM at its null driven at 10 GHz, 3 V: harmonics 2f, 4f = R P J2(m), R P J4(m) (t03 b)"
+"analysis type" "fd.pss_hb"
+"analysis name" "hb1"
+"analysis description" "Harmonic Balance Steady State Analysis `hb1': largefund = 10 GHz"
+"xVecSorted" "ascending"
+"tolerance.relative" 1.000000000000000e-06
+"fundamental" 1.000000000000000e+10
+"harms" 10
+TYPE
+"sweep" FLOAT DOUBLE PROP(
+"key" "sweep"
+)
+"Real" COMPLEX DOUBLE PROP(
+"units" ""
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Tau" COMPLEX DOUBLE PROP(
+"units" "N*m"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Alpha" COMPLEX DOUBLE PROP(
+"units" "rads/s^2"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Omega" COMPLEX DOUBLE PROP(
+"units" "rads/s"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Theta" COMPLEX DOUBLE PROP(
+"units" "rads"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"F" COMPLEX DOUBLE PROP(
+"units" "N"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Imp" COMPLEX DOUBLE PROP(
+"units" "m/s^3"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Acc" COMPLEX DOUBLE PROP(
+"units" "m/s^2"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Vel" COMPLEX DOUBLE PROP(
+"units" "m/s"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Pos" COMPLEX DOUBLE PROP(
+"units" "m"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"Phi" COMPLEX DOUBLE PROP(
+"units" "Wb"
+"key" "node"
+"tolerance" 1.000000000000000e-09
+)
+"V" COMPLEX DOUBLE PROP(
+"units" "V"
+"key" "node"
+"tolerance" 1.000000000000000e-09
+)
+"I" COMPLEX DOUBLE PROP(
+"units" "A"
+"key" "branch"
+"tolerance" 1.000000000000000e-15
+)
+"MMF" COMPLEX DOUBLE PROP(
+"units" "A*turn"
+"key" "node"
+"tolerance" 1.000000000000000e-12
+)
+"Wb" COMPLEX DOUBLE PROP(
+"units" "Wb"
+"key" "node"
+"tolerance" 1.000000000000000e-09
+)
+"Temp" COMPLEX DOUBLE PROP(
+"units" "C"
+"key" "node"
+"tolerance" 1.000000000000000e-04
+)
+"Pwr" COMPLEX DOUBLE PROP(
+"units" "W"
+"key" "node"
+"tolerance" 1.000000000000000e-09
+)
+"U" COMPLEX DOUBLE PROP(
+"units" ""
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"V/Sec" COMPLEX DOUBLE PROP(
+"units" "V/s"
+"key" "node"
+"tolerance" 9.999999999999999e-05
+)
+"I/Sec" COMPLEX DOUBLE PROP(
+"units" "A/s"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+)
+"1/Sec" COMPLEX DOUBLE PROP(
+"units" "1/s"
+"key" "node"
+"tolerance" 9.999999999999999e-05
+)
+"HOD" COMPLEX DOUBLE PROP(
+"units" ""
+"key" "node"
+"tolerance" 1.000000000000000e-02
+)
+"Q" COMPLEX DOUBLE PROP(
+"units" "coul"
+"key" "node"
+"tolerance" 1.000000000000000e-14
+)
+"Efield" COMPLEX DOUBLE PROP(
+"units" "V/m"
+"key" "node"
+"tolerance" 1.000000000000000e-06
+"sigtype" "optical"
+)
+SWEEP
+"freq" "sweep" PROP(
+"sweep_direction" 0
+"units" "Hz"
+"plot" 0
+"grid" 1
+)
+TRACE
+"Vs:p" "I"
+VALUE
+"freq" 0.000000000000000e+00
+"Vs:p" (3.898018350984370e-03 0.000000000000000e+00)
+"freq" 1.000000000000000e+10
+"Vs:p" (3.853230450038276e-19 1.039453241425129e-18)
+"freq" 2.000000000000000e+10
+"Vs:p" (-3.389901915525237e-03 -2.583940699091704e-19)
+"freq" 3.000000000000000e+10
+"Vs:p" (4.784727402603594e-19 5.545521517603052e-19)
+"freq" 4.000000000000000e+10
+"Vs:p" (-4.831744230029401e-04 6.439146066593779e-19)
+"freq" 5.000000000000000e+10
+"Vs:p" (-5.933490284900256e-19 5.150244466897506e-19)
+"freq" 6.000000000000000e+10
+"Vs:p" (-2.430164487157347e-05 -3.847466018180376e-19)
+"freq" 7.000000000000000e+10
+"Vs:p" (-1.985929790320367e-18 -5.297915832905682e-20)
+"freq" 8.000000000000000e+10
+"Vs:p" (-6.302584327288199e-07 -1.717198086922677e-18)
+"freq" 9.000000000000000e+10
+"Vs:p" (5.762991259214144e-19 -1.074716941665103e-18)
+"freq" 1.000000000000000e+11
+"Vs:p" (-1.000303969251321e-08 6.822185387927345e-19)
+END

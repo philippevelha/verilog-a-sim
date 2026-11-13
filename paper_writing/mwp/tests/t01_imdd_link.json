@@ -1,0 +1,195 @@
+{
+ "test": "t01_imdd_link",
+ "ok": true,
+ "wall_s": 2.53,
+ "rows": [
+  {
+   "what": "DC transfer, ER ideal: max |i - closed form| / i_max",
+   "sim": 5.615127254225e-08,
+   "ref": 0.0,
+   "err": 5.615127254225e-08,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "DC transfer, ER 20.0 dB: max |i - closed form| / i_max",
+   "sim": 5.93397599341159e-08,
+   "ref": 0.0,
+   "err": 5.93397599341159e-08,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "extinction ratio from the swept curve",
+   "sim": 20.0,
+   "ref": 20.0,
+   "err": 0.0,
+   "tol": 0.001,
+   "rel": false,
+   "unit": "dB",
+   "ok": true
+  },
+  {
+   "what": "AC slope efficiency at 100 MHz",
+   "sim": 0.003141536,
+   "ref": 0.0031415359314890014,
+   "err": 2.1808121892520957e-08,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A/V",
+   "ok": true
+  },
+  {
+   "what": "AC response 0.1-100 GHz, two poles: max |H - closed form| / |H(0)|",
+   "sim": 8.640575447076636e-05,
+   "ref": 0.0,
+   "err": 8.640575447076636e-05,
+   "tol": 0.0002,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "note": "intrinsic link gain (50 ohm in, 50 ohm load): -16.08 dB"
+  },
+  {
+   "what": "two-tone 0.2 V: fundamental",
+   "sim": 0.0006225247201314344,
+   "ref": 0.0006225247411920531,
+   "err": 3.383097465881542e-08,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "two-tone 0.2 V: IMD3 (2f1-f2)",
+   "sim": 1.927948576906224e-06,
+   "ref": 1.927952194534485e-06,
+   "err": 1.8764097322635582e-06,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "two-tone 0.2 V: second-order (f1+f2) at quadrature / fundamental",
+   "sim": 8.192706986492096e-09,
+   "ref": 0.0,
+   "err": 8.192706986492096e-09,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "two-tone 0.4 V: fundamental",
+   "sim": 0.001210760621244107,
+   "ref": 0.0012107606196223798,
+   "err": 1.3394283163127861e-09,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "two-tone 0.4 V: IMD3 (2f1-f2)",
+   "sim": 1.5187103654606039e-05,
+   "ref": 1.5187107165514781e-05,
+   "err": 2.3117692552071499e-07,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "two-tone 0.4 V: second-order (f1+f2) at quadrature / fundamental",
+   "sim": 1.39533099512933e-09,
+   "ref": 0.0,
+   "err": 1.39533099512933e-09,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "two-tone 0.8 V: fundamental",
+   "sim": 0.0021610231349871475,
+   "ref": 0.0021610231442106055,
+   "err": 4.268097710857267e-09,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "two-tone 0.8 V: IMD3 (2f1-f2)",
+   "sim": 0.00011416994359928187,
+   "ref": 0.00011416995172584745,
+   "err": 7.117954820625904e-08,
+   "tol": 0.0001,
+   "rel": true,
+   "unit": "A",
+   "ok": true
+  },
+  {
+   "what": "two-tone 0.8 V: second-order (f1+f2) at quadrature / fundamental",
+   "sim": 1.1897981521389288e-09,
+   "ref": 0.0,
+   "err": 1.1897981521389288e-09,
+   "tol": 1e-06,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "input IP3 (peak volts per tone), from the 0.2 V run",
+   "sim": 3.5938551879176077,
+   "ref": 3.6012652646284247,
+   "err": 0.00205763146180833,
+   "tol": 0.005,
+   "rel": true,
+   "unit": "V",
+   "ok": true
+  },
+  {
+   "note": "IIP3 = 21.11 dBm into 50 ohm; transient 10001 points in 0.7 s"
+  },
+  {
+   "what": "output noise PSD (shot + RIN + load thermal)",
+   "sim": 1.668227e-17,
+   "ref": 1.6682267503373517e-17,
+   "err": 1.4965750199163068e-07,
+   "tol": 0.002,
+   "rel": true,
+   "unit": "V^2/Hz",
+   "ok": true
+  },
+  {
+   "note": "  shot 3.204e-18, RIN 1.265e-17, thermal 8.288e-19 V^2/Hz"
+  },
+  {
+   "note": "noise figure 35.29 dB, OIP3 5.03 dBm, SFDR 106.53 dB Hz^(2/3) (derived from the simulated gain, intercept and noise)"
+  },
+  {
+   "what": "SFDR against the closed-form chain",
+   "sim": 106.53298166444723,
+   "ref": 106.54490884606051,
+   "err": 0.011927181613273774,
+   "tol": 0.05,
+   "rel": false,
+   "unit": "dB Hz^(2/3)",
+   "ok": true
+  }
+ ],
+ "data": {
+  "nf_db": 35.28692616773334,
+  "sfdr": 106.53298166444723,
+  "iip3_dbm": 21.11121147017609,
+  "gain_db": -16.077602459396946
+ }
+}

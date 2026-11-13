@@ -1,0 +1,17 @@
+// 20 -- MZM at its null driven at 10 GHz, 3 V: harmonics 2f, 4f = R P J2(m), R P J4(m) (t03 b)
+// STAGE 2: hb/hbnoise parameter names checked against the help text of SPECTRE 24.10.078 (funds, fundfreqs,
+// maxharms, tstab, maxsideband, noisetype, noiseout). Not yet run.
+simulator lang=spectre
+global 0
+include "models.scs"
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+X1 (a_re a_im nu) mwp_laser p_mw=10
+Vrf (rf 0) vsource type=sine ampl=3 freq=10e9 fundname="frf"
+Vb (vb 0) vsource dc=4
+X2 (a_re a_im b_re b_im bb_re bb_im rf 0 vb) mwp_mzm vpi=4 vpi_dc=4 rterm=0
+Vk (k 0) vsource dc=3
+X3 (b_re b_im an k) mwp_pd resp=0.8
+Vs (an 0) vsource dc=0
+save Vs:p
+hb1 hb funds=["frf"] maxharms=[10] errpreset=conservative
