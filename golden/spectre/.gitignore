@@ -1,10 +1,10 @@
-# Raw Spectre run output stays local (author's decision, 2026-11-13): the logs name the user,
-# the server and the licence server, and record Spectre's own timings and memory, which may
-# not be publishable under the Cadence licence agreement (being checked). The result files
-# (PSF), their logFile indexes and the netlists are the golden data and are committed.
-spectre.log
-summary*.txt
-environment*.txt
-ahdlcmi*.out
-# verilog-a-sim against Spectre, time and memory: local until the agreement is checked
-*.local.md
+# Spectre's output is not published (Cadence NDA, confirmed by the author 2026-11-14): its result
+# files (PSF), their logFile indexes, its logs, the run summaries and environment files all stay
+# on the machine that holds them. What is tracked here is ours: the translated netlists (*.scs) and
+# the READMEs. Comparisons of verilog-a-sim's accuracy against these files may be published;
+# numbers comparing speed or memory with Spectre may not (qualitative wording only).
+*
+!*/
+!*.scs
+!README.md
+!.gitignore

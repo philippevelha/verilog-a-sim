@@ -137,5 +137,5 @@ The comparison is done on the development machine from the returned archive
 - The exact spelling of some analysis parameters (`noisefmax`/`noiseseed` on `tran`, `hb`'s
   `fund`/`maxharms`). The help files in the archive settle them.
 - Whether the RF analyses are licensed (the `probe_hb` line of `summary.txt`).
-- Whether Spectre's outputs may be committed or published: check the licence agreement before
-  any of these results goes into `golden/` or the paper.
+- Settled 2026-11-14 (Cadence NDA): Spectre's output files are not committed or published;
+  accuracy figures against them may be; speed or memory comparisons only in qualitative words.

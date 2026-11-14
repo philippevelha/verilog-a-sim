@@ -139,6 +139,12 @@ def module_index(roots):
         if not src:
             continue
         src = re.sub(r"//.*", "", src)
+        # A macro defined as nothing takes its arguments with it: PSP102 writes every attribute
+        # as `P(type="instance" ...) with `define P(txt) empty, so the compiler never sees those
+        # tags and every parameter is an instance parameter. Counting them anyway moved TYPE to
+        # a model card, where Spectre then ignored it (round 3, SFE-3238).
+        for mac in re.findall(r"^[ \t]*`define[ \t]+(\w+)\([^)]*\)[ \t]*$", src, re.M):
+            src = re.sub(r"`" + mac + r"\s*\((?:[^()]|\([^()]*\))*\)", "", src)
         names = declared_params(src)
         lower = {}
         for n in names:

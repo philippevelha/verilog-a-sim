@@ -17,10 +17,11 @@ below for exactly why, circuit by circuit.
 
 Cadence Spectre is the second oracle (`CLAUDE.md` §7), for what QSPICE cannot run: circuits that
 are Verilog-A throughout and harmonic balance with periodic noise. `golden/spectre/mwp/<deck>/`
-holds, per deck, Spectre's ASCII PSF results as written and the netlist (`<deck>.scs`), for
-SPECTRE 24.1.0.078. The run's log (`spectre.log`) and `environment.txt` are kept locally and are
-not committed (`golden/spectre/.gitignore`: they name the user, the server and the licence server,
-and record Spectre's timings, which the Cadence licence may not allow publishing). They
+holds, per deck, the netlist (`<deck>.scs`) and, on the machines that have them, Spectre's ASCII
+PSF results as written (SPECTRE 24.1.0.078). **Only the netlists are committed:** Spectre's
+output files, logs, summaries and environment files are not distributed (Cadence NDA;
+`golden/spectre/.gitignore`). Accuracy figures of verilog-a-sim against them may be published;
+numbers comparing speed or memory with Spectre may not. The outputs
 come from `paper_writing/mwp/spectre/run.sh`, run on the author's licensed server, and the same
 rule applies as above: **real Spectre output only**, never a hand-made or post-processed file.
 Large transient waveforms (30–100 MB: the noise transients `11_*` and the oscillator transients

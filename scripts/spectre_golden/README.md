@@ -4,8 +4,11 @@ The repository has 173 decks under `circuits/`; 33 have a QSPICE golden referenc
 This folder translates the other 140 to Cadence Spectre so they can get one, the same way the
 microwave-photonics library did (`paper_writing/mwp/spectre_golden/`).
 
-**Status, 2026-11-13 (afternoon): second server run returned 72 of 86 clean, of which 24
-simulated the wrong circuit; 56 kept as golden. Package fixed for a third round** (below). 103 decks translated; 37 left out, each with its reason in `REFUSED.md`. `MANIFEST.md` lists every netlist with its deck,
+**Status, 2026-11-13 (evening): third server run returned 76 of 84 clean, of which one (NAND
+`psp102`) simulated the wrong circuit; 75 kept as golden, 65 of them agree with verilog-a-sim
+2.56.0** (below). Spectre's outputs are kept on the machines that hold them, not in the
+repository (Cadence NDA, 2026-11-14): "installed" below means copied into the local
+`golden/spectre/` tree, of which only the netlists are tracked. 103 decks translated; 37 left out, each with its reason in `REFUSED.md`. `MANIFEST.md` lists every netlist with its deck,
 analyses, models and size class.
 
 ## First run on the server (2026-11-12): 33 of 105 clean
@@ -69,9 +72,36 @@ The standard set only (`run.sh` without `--all`). Full table and the comparison 
   its netlists from round 1, so check it is unpacked fresh), and the li-ion and speaker models,
   whose net-array indices are parameter expressions (`sh[N-1]`), which Spectre's compiler
   rejects although the LRM allows them.
-- 41 of the 56 agree with verilog-a-sim. Of the rest, `bsimsoi`'s NAND (our output stuck at
-  0.44 V) is the one new disagreement that looks like ours; `portprobe_ac` extends the known
-  port-current approximation to AC.
+- 41 of the 56 agreed with verilog-a-sim 2.55.0+4; 46 with 2.56.0, which makes `I(<port>)` and
+  `I(br)` include the displacement current (the five port-current decks now agree). Of the rest,
+  `bsimsoi`'s NAND (our output stuck at 0.44 V) is the one disagreement that looks like ours.
+- A first `run3/` upload was a copy of round 2's results; the real third run replaced it (below).
+
+## Third run (2026-11-13, evening): 76 of 84 clean, 75 usable
+
+The fixed package, standard set (84 decks: `gray_scott` no longer shipped). Full table and the
+comparison in `golden/spectre/zoo/README.md`; in short:
+
+- **The round-2 fixes worked.** The nine `TYPE` decks and the ten SG13G2 PSP103 SNN transistor
+  decks run with no SFE-101/3239/30 in their logs, and the four `fig5_tx*` decks that stopped on
+  convergence in round 2 now complete. All 19 agree with verilog-a-sim 2.56.0 (worst 3.5e-4 of the
+  swing, `fig5_tx_none`). `thermistor_rt` runs and agrees (2.0e-7). The escaped `save X1.v\[0\]`
+  is accepted (no SFE-874).
+- **One new wrong circuit: NAND `psp102`** (SFE-101 + SFE-3238 on all four model cards). The
+  translator now puts `TYPE` on a model card because PSP102's source has `type="instance"` tags,
+  but they sit inside `` `P(...) ``, which `Common102_macrodefs.include` defines as empty, so
+  Spectre sees no attributes, takes every parameter as an instance parameter and ignores `TYPE` on
+  the card. **Fixed in 2.56.0+1:** `module_index` strips the calls of a macro defined as nothing
+  before looking for the tags, so PSP102's `TYPE` goes back on the instance; regenerating changed
+  that one netlist and no other. Unverified on the server until the next round. Round 2's
+  `psp102` (`TYPE` on the instance) is the one kept.
+- **8 failed, all VACOMP-1192** (a net-array index that is a parameter expression, LRM-legal,
+  rejected by Spectre's compiler): the three li-ion and three speaker decks as before, and now
+  the two `hh_*` decks, whose `hh_cable.va` indexes `v[probe_a]`, `v[probe_b]` with integer
+  parameters inside `cross(...)` (lines 170–171). The same model-portability decision as li/speaker.
+- 75 decks installed (70 in `golden/spectre/zoo/`, 5 over 10 MB in `zoo_large/`), replacing
+  their round-2 directories. Against verilog-a-sim 2.56.0: 65 of the 75 agree, plus round 2's
+  `psp102`; the ten that do not are the round-2 disagreements with the same worst-case errors.
 
 ## What is left out, and why
 

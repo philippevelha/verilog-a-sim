@@ -12,10 +12,10 @@ file here; regenerate it on the server instead (below).
 | Format | ASCII PSF (`spectre -format psfascii`); read by `paper_writing/mwp/spectre/psf.py` |
 | Gate | `paper_writing/mwp/tests/t12_spectre_golden.py` (verilog-a-sim against these files) |
 
-Each directory holds the result files of one netlist and the netlist itself (`<deck>.scs`).
-Spectre's log (`spectre.log`) and `environment.txt` are kept beside them locally but not
-committed (`../.gitignore`): they name the user, the server and the licence server, and record
-Spectre's timings, which may not be publishable under the Cadence licence agreement.
+Each directory holds the netlist (`<deck>.scs`) and, on the machines that have them, the result
+files of that netlist. **Only the netlists are committed:** Spectre's result files, logs and
+`environment.txt` are not distributed (Cadence NDA, `../.gitignore`), so without them the gate
+reports itself skipped.
 
 | Directory | Analysis | Used by the gate for |
 |---|---|---|

@@ -89,7 +89,8 @@ va-cli sim link.net --model lib --tran     # with  Vrf rf gnd SIN(0 0.2 1e9)  an
 
 What "validated" means here: **against closed forms** (t01–t11), and since 2026-11-12 **against
 Cadence Spectre**, adopted as the golden reference for this library (`CLAUDE.md` §7). Spectre's
-outputs are committed in `golden/spectre/mwp/`; `t12_spectre_golden.py` runs the same circuits
+outputs sit in `golden/spectre/mwp/` on the machines that hold them (not distributed: Cadence
+NDA; `t12` reports itself skipped without them); `t12_spectre_golden.py` runs the same circuits
 here and compares, 16 checks, all passing: DC 6e-8, AC 9e-5 (the print resolution of the phase),
 noise 1e-6 and 1e-5, two-tone fundamental and IMD3 3e-8 and 2e-6, filter and beamformer 9e-5,
 a delay at the noise frequency 2e-5; against Spectre's harmonic balance, the multiplier's

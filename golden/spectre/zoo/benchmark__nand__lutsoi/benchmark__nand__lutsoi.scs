@@ -1,0 +1,25 @@
+// benchmark__nand__lutsoi -- Spectre translation of circuits/benchmark/nand/lutsoi.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "benchmark/models/L-UTSOI/L_UTSOI_102.va"
+
+VDD (vdd 0) vsource dc=1.2
+VA (a 0) vsource dc=0
+VB (b 0) vsource dc=1.2
+model XM1_model l_utsoi TYPE=1
+XM1 (out a n001 0 tn1) XM1_model
+model XM2_model l_utsoi TYPE=1
+XM2 (n001 b 0 0 tn2) XM2_model
+model XM3_model l_utsoi TYPE=-1
+XM3 (vdd b out vdd tn3) XM3_model
+model XM4_model l_utsoi TYPE=-1
+XM4 (vdd a out vdd tn4) XM4_model
+RT1 (tn1 0) resistor r=0.001
+RT2 (tn2 0) resistor r=0.001
+RT3 (tn3 0) resistor r=0.001
+RT4 (tn4 0) resistor r=0.001
+
+save out
+sw dc dev=VA param=dc start=0 stop=1.2 step=0.012

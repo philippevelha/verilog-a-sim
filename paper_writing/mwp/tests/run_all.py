@@ -53,7 +53,8 @@ def main():
         ok = sum(r["ok"] for r in rows)
         n_checks += len(rows); n_pass += ok
         key = d["test"][:3]
-        summary.append(f"| `{d['test']}` | {TITLES.get(key, '')} | {ok}/{len(rows)} | {'pass' if d['ok'] else '**FAIL**'} | {d['wall_s']} |")
+        status = "skipped (no data)" if d.get("skipped") else ("pass" if d["ok"] else "**FAIL**")
+        summary.append(f"| `{d['test']}` | {TITLES.get(key, '')} | {ok}/{len(rows)} | {status} | {d['wall_s']} |")
         body += ["", f"## {d['test']} - {TITLES.get(key, '')}", "", "| Check | sim | ref | err | tol | |", "|---|---|---|---|---|---|"]
         for r in d["rows"]:
             if "note" in r:

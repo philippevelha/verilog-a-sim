@@ -1,0 +1,19 @@
+// benchmark__psp103_inverter_tran -- Spectre translation of circuits/benchmark/psp103_inverter_tran.net (scripts/spectre_golden/net2spectre.py)
+simulator lang=spectre
+global 0
+opts options reltol=1e-6 vabstol=1e-9 iabstol=1e-15 temp=27 tnom=27 gmin=1e-18 save=selected
+
+ahdl_include "benchmark/models/psp103/psp103.va"
+
+Vdd (vdd 0) vsource dc=1.2
+Vmeas (vss 0) vsource dc=0
+V1 (in 0) vsource dc=0 type=pulse val0=0 val1=1.2 delay=0 rise=2e-10 fall=1e-10 width=1e-09 period=2e-09
+model XMP_model PSP103VA TYPE=-1
+XMP (out in vdd vdd) XMP_model L=1e-07 W=1e-06
+model XMN_model PSP103VA TYPE=1
+XMN (out in vss vss) XMN_model L=1e-07 W=1e-06
+C3 (in vss) capacitor c=3.84e-16
+C2 (out vss) capacitor c=5.76e-16
+
+save in out
+tr tran stop=1e-08 step=1e-11

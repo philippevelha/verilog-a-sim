@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """T12 -- verilog-a-sim against Cadence Spectre, the golden reference for this library.
 
-Spectre (SPECTRE 24.1.0.078) was adopted as a golden reference on 2026-11-12. Its outputs are
-committed in golden/spectre/mwp/<deck>/ (ASCII PSF, with the netlist and the log); this test runs
-the same circuits here and compares the two simulators directly. Each deck below is the
+Spectre (SPECTRE 24.1.0.078) was adopted as a golden reference on 2026-11-12. Its outputs sit in
+golden/spectre/mwp/<deck>/ (ASCII PSF) on the machines that hold them; they are not distributed
+(Cadence NDA), so the repository has only the netlists and, without the outputs, this test reports
+itself skipped. It runs the same circuits here and compares the two simulators directly. Each deck below is the
 verilog-a-sim spelling of the Spectre netlist in that directory, parameter for parameter.
 
 Not in this gate, and why:
@@ -23,6 +24,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import psf
 
 GOLD = os.path.join(REPO, "golden", "spectre", "mwp")
+
+# Spectre's outputs are not distributed (Cadence NDA): on a machine without them this gate cannot
+# run, and says so rather than failing or passing.
+_HAVE = [f for f in __import__("glob").glob(os.path.join(GOLD, "*", "*"))
+         if not f.endswith((".scs", ".md"))]
+if not _HAVE:
+    import json
+    msg = f"skipped: no Spectre outputs in {GOLD} (not distributed; Cadence NDA)"
+    print(msg)
+    json.dump({"test": "t12_spectre_golden", "ok": True, "skipped": msg, "wall_s": 0, "rows": []},
+              open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "t12_spectre_golden.json"), "w"),
+              indent=1)
+    sys.exit(0)
+
 rep = Report("t12_spectre_golden")
 RESP, VPI, P = 0.8, 4.0, 10.0
 

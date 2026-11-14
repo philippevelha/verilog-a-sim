@@ -22,6 +22,37 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.56.0+1 - 2026-11-13
+---------------------
+**Third Spectre round for the zoo: 75 results kept, the round-2 wrong circuits fixed; one more
+translator defect fixed; Spectre's output files withdrawn from the repository** (scripts, docs and
+.gitignore; no simulator change).
+golden/spectre/, scripts/spectre_golden/, paper_writing/mwp/, CLAUDE.md section 7.
+  * Spectre's output is no longer tracked (Cadence NDA, confirmed by the author 2026-11-14): the
+    result files (PSF), logFile indexes, logs, summaries and environment files stay on the
+    machines that hold them; only our translated netlists and the READMEs are committed. The 145
+    output files committed in 2.55.0+6 leave tracking here (they remain in that commit's history).
+    Allowed: accuracy figures of verilog-a-sim against them. Not allowed: numbers comparing speed
+    or memory with Spectre; golden/spectre/zoo/README.md now has a qualitative section instead.
+    t12_spectre_golden.py reports itself skipped (and run_all.py shows it so) where the outputs
+    are absent.
+  * The server ran the corrected package: 76 of 84 decks clean (round 2: 71 of 86 by the same
+    count). All 19 round-2 wrong-circuit decks whose models compile now run the right circuit
+    (no SFE-101/3239/30 in their logs), including the four fig5_tx* that did not converge in
+    round 2; thermistor_rt runs. 8 still fail, all VACOMP-1192 (a net-array index written with a
+    parameter: li-ion, speaker, and now hh_cable inside cross()) — model portability, left as is
+    by the author's decision.
+  * One new wrong circuit, NAND psp102: PSP102 writes its `type="instance"` tags inside a macro
+    defined as nothing, so the translator moved TYPE to a model card that Spectre then ignored
+    (SFE-3238). Fixed: net2spectre.py strips the calls of an empty macro before looking for tags;
+    regenerating changes that one netlist, back to round 2's form. Round 2's psp102 is kept.
+  * 75 round-3 results installed in the local golden/spectre/ tree (70 in zoo/, 5 over 10 MB in
+    zoo_large/), replacing round 2's; only their netlists are committed.
+  * Against verilog-a-sim 2.56.0 (compare_zoo.py): 66 of 76 agree, including the 19 formerly
+    wrong-circuit decks (worst 4.1e-4) and thermistor_rt (2.0e-7). The 10 disagreements are
+    round 2's, with the same worst-case errors; round 3 added none.
+
+
 2.56.0 - 2026-11-13
 -------------------
 **`I(<port>)` and the branch self-probe `I(br)` report the total current, displacement included**
