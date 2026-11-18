@@ -711,6 +711,10 @@ pub const E0608: Code = Code::new("E0608");
 /// the transient stalled at t = {time} s: {attempts} step attempts advanced it only {advanced} s
 pub const E0609: Code = Code::new("E0609");
 
+/// time step underflow at t = {time} s: Newton reached a residual of {residual} but not the tolerance
+/// --newton-reltol {reltol}
+pub const E060A: Code = Code::new("E060A");
+
 /// unknown subcommand `{name}`
 pub const E0701: Code = Code::new("E0701");
 
@@ -984,6 +988,15 @@ pub const W0601: Code = Code::new("W0601");
 /// transient noise leaves out {sources} flicker or tabulated noise source(s) in {devices} device(s)
 pub const W0602: Code = Code::new("W0602");
 
+/// {at}: {tier} did not find the DC operating point ({reason}); trying {next}
+pub const W0603: Code = Code::new("W0603");
+
+/// {at}: the DC operating point was found by {tier}, after the methods before it failed
+pub const W0604: Code = Code::new("W0604");
+
+/// {at}: the DC operating point was found by pseudo-transient continuation, after Newton and gmin stepping failed
+pub const W0605: Code = Code::new("W0605");
+
 /// `.nodeset`: the solve with the nodeset nets held did not converge ({reason}); the nodesets are used as a starting point only
 pub const W0701: Code = Code::new("W0701");
 
@@ -1006,12 +1019,12 @@ pub const ALL: &[Code] = &[
     E0502, E0503, E0504, E0505, E0506, E0507, E0508, E0509, E0510, E0511, E0512, E0513, E0514,
     E0515, E0516, E0517, E0518, E0519, E0520, E0521, E0522, E0523, E0524, E0525, E0526, E0527,
     E0528, E0529, E0530, E0531, E0532, E0533, E0534, E0535, E0601, E0602, E0603, E0604, E0605,
-    E0606, E0607, E0608, E0609, E0701, E0702, E0703, E0704, E0705, E0706, E0707, E0708, E0709,
-    E0710, E0711, E0712, E0713, E0714, E0715, E0716, E0717, E0718, E0719, E0720, E0721, E0722,
-    E0723, E0724, E0725, E0726, E0727, E0728, E0729, E0730, E0731, E0732, E0733, E0734, E0735,
-    E0736, E0737, E0738, E0739, E073A, E073B, R0101, R0201, R0202, R0203, R0204, R0301, R0302,
-    R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405,
-    R0406, R0407, R0408, R0409, R0410, R0411, R0412, W0101, W0102, W0103, W0104, W0301, W0302,
-    W0401, W0402, W0403, W0501, W0502, W0503, W0504, W0505, W0506, W0507, W0508, W0509, W050A,
-    W050B, W050C, W0601, W0602, W0701,
+    E0606, E0607, E0608, E0609, E060A, E0701, E0702, E0703, E0704, E0705, E0706, E0707, E0708,
+    E0709, E0710, E0711, E0712, E0713, E0714, E0715, E0716, E0717, E0718, E0719, E0720, E0721,
+    E0722, E0723, E0724, E0725, E0726, E0727, E0728, E0729, E0730, E0731, E0732, E0733, E0734,
+    E0735, E0736, E0737, E0738, E0739, E073A, E073B, R0101, R0201, R0202, R0203, R0204, R0301,
+    R0302, R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404,
+    R0405, R0406, R0407, R0408, R0409, R0410, R0411, R0412, W0101, W0102, W0103, W0104, W0301,
+    W0302, W0401, W0402, W0403, W0501, W0502, W0503, W0504, W0505, W0506, W0507, W0508, W0509,
+    W050A, W050B, W050C, W0601, W0602, W0603, W0604, W0605, W0701,
 ];

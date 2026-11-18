@@ -110,10 +110,27 @@ pub fn operating_point_continued(
 /// The **original** failure is what surfaces if the rescue also fails. It describes the real
 /// circuit, naming the row that went singular or non-finite; the laddered one describes a
 /// shunted variant the user never wrote.
+///
+/// **A fourth tier, pseudo-transient continuation** (since 2.58.0,
+/// [`NewtonConfig::pseudo_transient`]), after the three ladders: a march in fictitious time from
+/// the same start. Every `gmin` tier is a homotopy towards the *same* Newton problem, so where
+/// that problem has no root near the start — just past the fold of a hysteretic circuit, where
+/// the branch the start lies on has ended — all three end where the plain solve did, at the
+/// branch's ghost. The march falls off the branch onto the one that remains, as the circuit
+/// would (`docs/bugs011126.txt` C2: an emitter-coupled Schmitt trigger's `.dc` sweep failed in a
+/// ~0.5 mV window past its fold, at every tier).
+///
+/// **Every tier change is reported** through [`NewtonConfig::on_rescue`]: each tier that failed,
+/// with its error and the tier tried next, and the tier that solved ([`RescueEvent`]).
 fn with_gmin_rescue<T>(
     cfg: NewtonConfig,
     mut attempt: impl FnMut(NewtonConfig) -> Result<T, CoreError>,
 ) -> Result<T, CoreError> {
+    let report = |e: RescueEvent| {
+        if let Some(sink) = cfg.on_rescue {
+            sink(e);
+        }
+    };
     match attempt(cfg) {
         Ok(ok) => Ok(ok),
         // **`gmin` stepping, as a rescue rather than a routine.** The homotopy shunts a
@@ -134,7 +151,9 @@ fn with_gmin_rescue<T>(
         // The *original* failure is reported if the rescue also fails: it describes the real
         // circuit, naming the row that went singular or non-finite, where the laddered one
         // describes a shunted variant of it that the user never wrote.
-        Err(first) if cfg.gmin_steps == 0 && worth_a_gmin_retry(&first) => {
+        Err(first)
+            if cfg.gmin_steps == 0 && !cfg.pseudo_transient && worth_a_gmin_retry(&first) =>
+        {
             // Adaptive steps along the ramp (since 1.24.0): fewer stages where they converge
             // quickly, a retry from the last point with a smaller step where one fails —
             // measured 39–45% fewer iterations on the PSP103 chains and 22% on c432, every deck
@@ -147,22 +166,56 @@ fn with_gmin_rescue<T>(
             };
             // The tiers, cheapest in practice first; later ones are only reached when earlier
             // ones fail (§ above, `RESCUE_NODE_STEP`, `RESCUE_DAMPING_HALVINGS`).
-            let tiers = [
-                (cfg.max_node_step > RESCUE_NODE_STEP).then_some(NewtonConfig {
-                    max_node_step: RESCUE_NODE_STEP,
-                    ..laddered
-                }),
-                Some(laddered),
-                (cfg.max_damping_halvings < RESCUE_DAMPING_HALVINGS).then_some(NewtonConfig {
-                    max_damping_halvings: RESCUE_DAMPING_HALVINGS,
-                    ..laddered
-                }),
-            ];
-            for tier in tiers.into_iter().flatten() {
-                match attempt(tier) {
-                    Ok(ok) => return Ok(ok),
-                    Err(e) if worth_a_gmin_retry(&e) => {}
-                    Err(_) => break,
+            let tiers: Vec<(Tier, NewtonConfig)> = [
+                (cfg.max_node_step > RESCUE_NODE_STEP).then_some((
+                    Tier::CappedLadder,
+                    NewtonConfig {
+                        max_node_step: RESCUE_NODE_STEP,
+                        ..laddered
+                    },
+                )),
+                Some((Tier::Ladder, laddered)),
+                (cfg.max_damping_halvings < RESCUE_DAMPING_HALVINGS).then_some((
+                    Tier::DampedLadder,
+                    NewtonConfig {
+                        max_damping_halvings: RESCUE_DAMPING_HALVINGS,
+                        ..laddered
+                    },
+                )),
+                Some((
+                    Tier::PseudoTransient,
+                    NewtonConfig {
+                        pseudo_transient: true,
+                        ..cfg
+                    },
+                )),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            report(RescueEvent::Failed {
+                tier: Tier::Plain,
+                reason: first.to_string(),
+                next: tiers.first().map(|(t, _)| *t),
+            });
+            for (k, (tier, tier_cfg)) in tiers.iter().enumerate() {
+                match attempt(*tier_cfg) {
+                    Ok(ok) => {
+                        report(RescueEvent::Solved { tier: *tier });
+                        return Ok(ok);
+                    }
+                    Err(e) => {
+                        let next = tiers.get(k + 1).map(|(t, _)| *t);
+                        let stop = !worth_a_gmin_retry(&e);
+                        report(RescueEvent::Failed {
+                            tier: *tier,
+                            reason: e.to_string(),
+                            next: if stop { None } else { next },
+                        });
+                        if stop {
+                            break;
+                        }
+                    }
                 }
             }
             Err(first)
@@ -170,6 +223,52 @@ fn with_gmin_rescue<T>(
         Err(e) => Err(e),
     }
 }
+
+/// One stage of the DC rescue ([`with_gmin_rescue`]), in the order they are tried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    /// The ordinary Newton solve, before any rescue.
+    Plain,
+    /// The adaptive `gmin` ladder with each Newton step's change to a node capped
+    /// ([`RESCUE_NODE_STEP`]).
+    CappedLadder,
+    /// The adaptive `gmin` ladder alone.
+    Ladder,
+    /// The ladder with Newton's residual line search ([`RESCUE_DAMPING_HALVINGS`]).
+    DampedLadder,
+    /// Pseudo-transient continuation ([`NewtonConfig::pseudo_transient`]).
+    PseudoTransient,
+}
+
+impl Tier {
+    /// The tier's name as a user reads it in a warning.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Tier::Plain => "Newton",
+            Tier::CappedLadder => "gmin stepping with node steps capped at 0.5",
+            Tier::Ladder => "gmin stepping",
+            Tier::DampedLadder => "gmin stepping with a line search",
+            Tier::PseudoTransient => "pseudo-transient continuation",
+        }
+    }
+}
+
+/// What the DC rescue reports through [`NewtonConfig::on_rescue`], as it happens.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RescueEvent {
+    /// `tier` failed with `reason`; `next` is the tier tried now, `None` if none is left (the
+    /// solve then fails with the *first* tier's error, which describes the real circuit).
+    Failed {
+        tier: Tier,
+        reason: String,
+        next: Option<Tier>,
+    },
+    /// `tier` solved the operating point, after every tier before it had failed.
+    Solved { tier: Tier },
+}
+
+/// [`NewtonConfig::on_rescue`]'s type: a plain function, so the config stays `Copy`.
+pub type RescueSink = fn(RescueEvent);
 
 /// How many stages the `gmin` rescue ramps over — since 1.24.0 the **starting** step of the
 /// adaptive ramp (`1/30` of it), which then grows where stages converge quickly and shrinks
@@ -582,5 +681,163 @@ mod tests {
                 op.x[1]
             );
         }
+    }
+
+    /// `I = x³ − x − p` from node 0 to ground: an S-shaped element whose DC equation has
+    /// three roots for |p| < 2/(3√3) (two stable, `x = ±1` at `p = 0`, and an unstable middle
+    /// one) and only one past that **fold**, which is what a Schmitt trigger's switching point
+    /// looks like to the solver (`docs/bugs011126.txt` C2).
+    struct Cubic {
+        p: f64,
+        unknowns: [usize; 1],
+    }
+
+    impl Cubic {
+        fn new(p: f64) -> Self {
+            Cubic { p, unknowns: [0] }
+        }
+        fn root_error(&self, x: f64) -> f64 {
+            x * x * x - x - self.p
+        }
+    }
+
+    impl ModelInstance for Cubic {
+        fn unknowns(&self) -> &[usize] {
+            &self.unknowns
+        }
+        fn load(
+            &self,
+            x: &[f64],
+            _ctx: &va_abi::AnalysisCtx,
+            _state: &mut va_abi::ModelState,
+            sink: &mut dyn va_abi::stamps::StampSink,
+        ) {
+            let v = x[0];
+            sink.residual(0, v * v * v - v - self.p);
+            sink.jacobian(0, 0, 3.0 * v * v - 1.0);
+        }
+    }
+
+    fn ptran() -> NewtonConfig {
+        NewtonConfig {
+            pseudo_transient: true,
+            ..NewtonConfig::default()
+        }
+    }
+
+    /// Inside the bistable range, Newton started next to the unstable middle root converges to
+    /// it; the pseudo-transient march from the same start falls to a stable one — the property
+    /// that makes it the right tier for a hysteretic circuit, measured rather than assumed.
+    #[test]
+    fn pseudo_transient_settles_on_a_stable_root_where_newton_finds_the_unstable_one() {
+        let c = Cubic::new(0.0);
+        let insts: [&dyn ModelInstance; 1] = [&c];
+        let none = va_abi::FiredEvents::default();
+        let start = [0.1];
+        let newton =
+            newton::solve_with_events_from(&insts, 1, NewtonConfig::default(), &none, Some(&start))
+                .expect("Newton converges from 0.1");
+        assert!(newton[0].abs() < 1e-9, "Newton: {}", newton[0]);
+        let marched = newton::solve_with_events_from(&insts, 1, ptran(), &none, Some(&start))
+            .expect("the march converges");
+        assert!(
+            (marched[0] - 1.0).abs() < 1e-9,
+            "the march from 0.1 should fall to the stable root +1, got {}",
+            marched[0]
+        );
+    }
+
+    /// Just past the fold the lower branch has ended; started at its ghost, the march reaches
+    /// the root that remains, and it is a true root (the last solve has no shunt).
+    #[test]
+    fn pseudo_transient_crosses_a_fold_to_the_remaining_branch() {
+        let c = Cubic::new(0.39); // the fold is at p = 2/(3√3) = 0.3849
+        let insts: [&dyn ModelInstance; 1] = [&c];
+        let ghost = [-1.0 / 3.0_f64.sqrt()];
+        let x = newton::solve_with_events_from(
+            &insts,
+            1,
+            ptran(),
+            &va_abi::FiredEvents::default(),
+            Some(&ghost),
+        )
+        .expect("the march crosses the fold");
+        assert!(x[0] > 1.0, "should land on the upper branch, got {}", x[0]);
+        assert!(
+            c.root_error(x[0]).abs() < 1e-9,
+            "not a root: f = {}",
+            c.root_error(x[0])
+        );
+    }
+
+    thread_local! {
+        static EVENTS: std::cell::RefCell<Vec<RescueEvent>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record_event(e: RescueEvent) {
+        EVENTS.with(|v| v.borrow_mut().push(e));
+    }
+
+    fn take_events() -> Vec<RescueEvent> {
+        EVENTS.with(|v| std::mem::take(&mut *v.borrow_mut()))
+    }
+
+    /// Pseudo-transient continuation is the last tier, after the three ladders, and every tier
+    /// change is reported in order: each failure with the tier tried next, then the tier that
+    /// solved. When every tier fails, the last report says nothing is left.
+    #[test]
+    fn the_rescue_ends_with_pseudo_transient_and_reports_every_change() {
+        let cfg = NewtonConfig {
+            on_rescue: Some(record_event),
+            ..NewtonConfig::default()
+        };
+        take_events();
+        let tried = std::cell::RefCell::new(0usize);
+        let needs_ptran = |c: NewtonConfig| {
+            *tried.borrow_mut() += 1;
+            if c.pseudo_transient {
+                assert_eq!(c.gmin_steps, 0, "the march is not combined with a ladder");
+                Ok(())
+            } else {
+                Err(CoreError::Singular)
+            }
+        };
+        with_gmin_rescue(cfg, needs_ptran).expect("the march solves it");
+        assert_eq!(*tried.borrow(), 5, "plain + three ladders + the march");
+        let order: Vec<(Tier, Option<Tier>)> = take_events()
+            .into_iter()
+            .map(|e| match e {
+                RescueEvent::Failed { tier, next, .. } => (tier, next),
+                RescueEvent::Solved { tier } => (tier, None),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (Tier::Plain, Some(Tier::CappedLadder)),
+                (Tier::CappedLadder, Some(Tier::Ladder)),
+                (Tier::Ladder, Some(Tier::DampedLadder)),
+                (Tier::DampedLadder, Some(Tier::PseudoTransient)),
+                (Tier::PseudoTransient, None), // Solved
+            ]
+        );
+
+        let all_fail = |_: NewtonConfig| -> Result<(), CoreError> { Err(CoreError::Singular) };
+        with_gmin_rescue(cfg, all_fail).unwrap_err();
+        let events = take_events();
+        assert_eq!(events.len(), 5);
+        assert!(matches!(
+            events.last(),
+            Some(RescueEvent::Failed {
+                tier: Tier::PseudoTransient,
+                next: None,
+                ..
+            })
+        ));
+
+        // A solve that needs no rescue reports nothing.
+        with_gmin_rescue(cfg, |_| Ok::<(), CoreError>(())).unwrap();
+        assert!(take_events().is_empty());
     }
 }

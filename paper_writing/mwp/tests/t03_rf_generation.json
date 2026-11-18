@@ -1,7 +1,7 @@
 {
  "test": "t03_rf_generation",
  "ok": true,
- "wall_s": 1.65,
+ "wall_s": 1.35,
  "rows": [
   {
    "what": "beat at 1 GHz: amplitude R sqrt(P1 P2)",

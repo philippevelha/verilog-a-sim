@@ -1,7 +1,7 @@
 {
  "test": "t07_beamforming",
  "ok": true,
- "wall_s": 2.79,
+ "wall_s": 1.98,
  "rows": [
   {
    "what": "element responses 2-20 GHz: max |H - closed form| / |H| (phase printed to 0.01 deg)",

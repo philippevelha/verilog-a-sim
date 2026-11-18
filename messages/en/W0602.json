@@ -1,11 +1,11 @@
 {
   "code": "W0602",
-  "rev": 1,
-  "message": "transient noise leaves out {sources} flicker or tabulated noise source(s) in {devices} device(s): only white sources are generated in the time domain, so these contribute nothing to this run",
-  "description": "With --tran-noise, each white noise source a device declares becomes a random current in the transient run. A flicker source (flicker_noise, SPICE's KF) or a tabulated one (noise_table) has a spectrum that depends on frequency; producing it in the time domain needs a filter with memory, which this simulator does not have yet. Those sources are skipped, so the noise in this run is lower than the circuit's, most of all at low frequency. A .noise analysis of the same circuit includes them.",
+  "rev": 2,
+  "message": "transient noise leaves out {sources} noise source(s) in {devices} device(s): tabulated sources, and flicker sources when no flicker band is set, are not generated in the time domain, so these contribute nothing to this run",
+  "description": "With --tran-noise, each white noise source a device declares becomes a random current in the transient run, and (from 2.57.0) each flicker source (flicker_noise, SPICE's KF, 1/f^e) a sum of sinusoids from --tran-noise-fmin (default 1/(run length)) to fmax/4. A tabulated source (noise_table) has an arbitrary spectrum that is not synthesized yet; it is skipped. So are flicker sources when --tran-noise-fmin is at or above fmax/4 (an empty band). The noise in this run is then lower than the circuit's. A .noise analysis of the same circuit includes every source.",
   "actions": [
-    "If the left-out sources do not matter in your band (flicker noise well below the frequencies you look at), ignore this.",
-    "Run a .noise analysis to see how large they are next to the white sources.",
-    "For a 1/f^2 source such as a laser linewidth, model the random walk explicitly in the device (integrate a white source) so that the white source is what the simulator generates."
+    "If the left-out sources do not matter in your band, ignore this.",
+    "Run a .noise analysis to see how large they are next to the generated sources.",
+    "For flicker sources, lower --tran-noise-fmin below fmax/4, or raise --tran-noise."
   ]
 }

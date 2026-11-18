@@ -11,6 +11,9 @@
 // P_bar = il*P_in*sin^2((th+phb)/2). V(bias) = vpi_dc/2 is quadrature, vpi_dc the null of
 // `out`. alpha = 0 is a chirp-free push-pull (X-cut) device, alpha = +-1 a single-arm drive.
 // A finite extinction ratio er_db sets the arm imbalance a2/a1 = (sqrt(ER)-1)/(sqrt(ER)+1).
+// cel adds the electrode's capacitance across rf_p/rf_n (a lumped electrode, as a segmented or
+// ring-loaded silicon modulator presents to its driver; set rterm = 0 for an unterminated one).
+// It loads the driver only: the modulation still follows V(rf_p, rf_n) through f3db.
 // Limitations: as mwp_pm (lumped electrode, one pole); no bias drift; no photorefractive or
 // thermal effects; wavelength-independent.
 `include "disciplines.vams"
@@ -29,6 +32,7 @@ module mwp_mzm(i_re, i_im, o_re, o_im, ob_re, ob_im, rf_p, rf_n, bias);
     parameter real il_db  = 0.0   from [0:inf);        // insertion loss, dB
     parameter real f3db   = 0.0   from [0:inf);        // electro-optic bandwidth, Hz (0: unlimited)
     parameter real rterm  = 50.0  from [0:inf);        // RF termination, ohm (0: open)
+    parameter real cel    = 0.0   from [0:inf);        // electrode capacitance, F (0: none)
     real th, phb, p1, p2, g, tau, gam, a1, a2, ur, ui, wr, wi;
     analog begin
         tau = (f3db > 0.0) ? 1.0 / (`MWP_TWOPI * f3db) : 0.0;
@@ -38,6 +42,7 @@ module mwp_mzm(i_re, i_im, o_re, o_im, ob_re, ob_im, rf_p, rf_n, bias);
             I(rf_p, rf_n) <+ V(rf_p, rf_n) / rterm;
             I(rf_p, rf_n) <+ white_noise(4.0 * `MWP_KB * $temperature / rterm, "rterm");
         end
+        I(rf_p, rf_n) <+ ddt(cel * V(rf_p, rf_n));
         th  = `MWP_PI * V(vx) / vpi;
         phb = `MWP_PI * V(bias) / vpi_dc + phi0;
         p1  =  0.5 * (1.0 + alpha) * th + 0.5 * phb;

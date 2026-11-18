@@ -185,8 +185,11 @@ fn print_usage() {
                                  injects a random current, sampled every 1/(2 fmax) s
                                  and joined by straight lines; spectrum flat to about
                                  0.26 fmax. The time step is bounded to that interval.
-                                 Flicker and tabulated sources are left out (W0602).
+                                 Flicker sources (flicker_noise, 1/f^e) are a sum of
+                                 sinusoids, 10 bands per decade, from fmin to fmax/4.
+                                 Tabulated sources are left out (W0602).
                                  One realization per run; not validated against golden.
+         --tran-noise-fmin <f>   Lowest flicker frequency, Hz (default 1/(run length)).
          --tran-noise-seed <n>   Seed of that realization (default 1). The same seed
                                  gives the same run.
          --bypass                Device bypass in a transient run (SPICE's BYPASS): a
@@ -311,6 +314,20 @@ fn cmd_sim(args: &[String]) -> Result<()> {
                     .arg("expected", "a non-negative integer")
             })?,
         };
+        let flicker_fmin = match parse_flag(args, "--tran-noise-fmin") {
+            None => None,
+            Some(s) => Some(
+                s.parse::<f64>()
+                    .ok()
+                    .filter(|f| f.is_finite() && *f > 0.0)
+                    .ok_or_else(|| {
+                        va_diag::Diagnostic::new(va_diag::codes::E0703)
+                            .arg("option", "--tran-noise-fmin")
+                            .arg("value", &s)
+                            .arg("expected", "a frequency in hertz, above zero")
+                    })?,
+            ),
+        };
         if args.iter().any(|a| a == "--tran") {
             println!(
                 "[va-cli] transient noise: white sources, bandwidth {fmax:e} Hz (one sample every {:e} s, spectrum flat to about {:e} Hz), seed {seed}",
@@ -322,7 +339,11 @@ fn cmd_sim(args: &[String]) -> Result<()> {
                 "[va-cli] note: --tran-noise applies to a transient run (--tran) only; this analysis runs without it."
             );
         }
-        va_cli::set_tran_noise(Some(va_transient::noise::TranNoiseConfig { fmax, seed }));
+        va_cli::set_tran_noise(Some(va_transient::noise::TranNoiseConfig {
+            fmax,
+            seed,
+            flicker_fmin,
+        }));
     }
     // `--bypass` / `--bypass-reltol <x>`: device bypass (`va_cli::set_bypass`), transient only.
     let bypass_reltol = parse_flag(args, "--bypass-reltol");

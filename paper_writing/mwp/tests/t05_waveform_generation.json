@@ -1,7 +1,7 @@
 {
  "test": "t05_waveform_generation",
  "ok": true,
- "wall_s": 7.8,
+ "wall_s": 6.32,
  "rows": [
   {
    "what": "16-QAM at 20 GHz: rms error vector against the exact symbols",
@@ -24,7 +24,7 @@
    "ok": true
   },
   {
-   "note": "EVM on the ideal grid: 1.007 % at a peak drive of 0.3 Vpi; 45019 points, 6.3 s"
+   "note": "EVM on the ideal grid: 1.007 % at a peak drive of 0.3 Vpi; 45019 points, 5.1 s"
   },
   {
    "what": "chirp: max |i - closed form| / amplitude, every time point",

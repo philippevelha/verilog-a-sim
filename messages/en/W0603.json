@@ -1,0 +1,11 @@
+{
+  "code": "W0603",
+  "rev": 1,
+  "message": "{at}: {tier} did not find the DC operating point ({reason}); trying {next}",
+  "description": "A DC operating point (a `.op`, each point of a `.dc` sweep, the bias of `.ac`/`.noise`, the start of a `.tran`) is first solved by plain Newton iteration. When that fails, the simulator tries a sequence of rescue methods, cheapest first: gmin stepping with each node's step capped, gmin stepping alone, gmin stepping with a line search, and last pseudo-transient continuation. In a `.dc` sweep the whole sequence runs first from the previous point's answer and then, if that fails, from zero. This warning is printed each time one method fails and the next is tried. It is not an error: if a later method succeeds, the answer is a true operating point of the circuit (the final solve of every method has no artificial element in it). It tells you the circuit is hard to solve at this point, which is often a sign of something real: a fold or switching point, a node held only by leakage, a device driven far outside its normal range.",
+  "actions": [
+    "If a later method succeeds (W0604 or W0605 follows), the answer stands; check that it is the state you expected when the circuit has more than one.",
+    "If every method fails, the error that follows describes the plain Newton attempt, which is the one that tells you most about the circuit itself.",
+    "In a `.dc` sweep, a point that needs the rescue next to points that do not is usually a switching threshold; a finer step around it shows the transition."
+  ]
+}

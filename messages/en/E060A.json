@@ -1,0 +1,11 @@
+{
+  "code": "E060A",
+  "rev": 1,
+  "message": "time step underflow at t = {time} s: Newton reached a residual of {residual} but not the tolerance --newton-reltol {reltol}",
+  "description": "This underflow is not the circuit moving too fast. The step's Newton solve got the answer and then could go no further: its last iterates moved by less than 1e-6 relative and its residual stayed under 1e-6, yet it never met the convergence tolerance, which by default (1e-9) is a thousand times stricter than SPICE's. On this circuit at this time, that tolerance asks for more digits than floating-point arithmetic can deliver. Halving the step cannot help, because the capacitor and inductor terms grow as 1/h and amplify the rounding noise, so the controller halved down to the minimum step and stopped. The waveform up to this time was not written.",
+  "actions": [
+    "Decide what accuracy you need, then rerun with a looser tolerance: `--newton-reltol 1e-6` is still 1000 times tighter than SPICE's default `reltol`.",
+    "Check the answer does not depend on that choice: run at two tolerances (e.g. `1e-6` and `1e-7`) and compare the waveforms you care about.",
+    "If the run then stops elsewhere with E0605 or E0609, that is a separate cause: a fast edge or a discontinuity at that time."
+  ]
+}

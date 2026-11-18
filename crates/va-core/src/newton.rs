@@ -134,6 +134,38 @@ pub struct NewtonConfig {
     /// and its result is printed as the transient's `t = 0` value. `false` (the default) is a
     /// standalone operating point — `.op`, a `.dc` point — which *is* its analysis's last step.
     pub transient_seed: bool,
+    /// Solve by **pseudo-transient continuation** instead of one Newton solve: march the
+    /// circuit in a fictitious time, with a capacitance `C` from every [`UnknownKind::Node`] row
+    /// to ground, by backward Euler from the starting point until it stops moving, then finish
+    /// with an ordinary unshunted solve from where it settled ([`pseudo_transient`]). Each
+    /// pseudo-step is a Newton solve of `f(x) + g·(x − x_prev) = 0`, `g = C/h`, with `g` falling
+    /// as the march converges easily and rising again where a step fails.
+    ///
+    /// What it is for: a point a Newton iteration cannot reach from where it starts, because the
+    /// nearest thing to a root is not one. Just past a **fold** of a hysteretic circuit (a
+    /// Schmitt trigger's switching point) the branch the start lies on has ended; Newton parks
+    /// at its ghost, the residual small but not zero, and `gmin` stepping parks there too. The
+    /// march does what the circuit does — falls off the end of the branch onto the one that
+    /// remains. Each pseudo-step must move along the circuit's own flow (`f·Δx ≤ 0` on the node
+    /// rows, [`along_the_flow`]), which keeps the march off an unstable equilibrium it starts
+    /// beside: backward Euler with a long step would otherwise damp the unstable mode and land on
+    /// it (measured on a bistable cubic: from x = 0.1 the march went to the middle root 0
+    /// before the test, to the stable root 1 with it).
+    ///
+    /// **Limits, stated.** The flow test is exact in one dimension and for a symmetric Jacobian;
+    /// for a general circuit it is a heuristic, not a stability proof. An equilibrium unstable
+    /// only through a complex pair (an oscillator's DC point) is not detected — that is also
+    /// SPICE's answer for such a circuit's `.op`. The fictitious capacitances are not the
+    /// circuit's own, so the *path* is not the circuit's transient, and with several stable
+    /// states reachable the one chosen can depend on them. The end point is a true solution of
+    /// the unshunted circuit (the last solve has no shunt).
+    /// Default `false`; the DC rescue (`crate::dc`) uses it as its last tier.
+    pub pseudo_transient: bool,
+    /// Where the DC rescue (`crate::dc`) reports each tier that failed and the tier that
+    /// finally solved, so the user can be told (see [`crate::dc::RescueEvent`]). `va-core`
+    /// prints nothing itself; `va-cli` passes a function that queues the events for its
+    /// warnings. `None` (the default) reports nowhere; the solve is the same either way.
+    pub on_rescue: Option<crate::dc::RescueSink>,
 }
 
 impl NewtonConfig {
@@ -187,6 +219,8 @@ impl Default for NewtonConfig {
             log_full: false,
             log_counters: None,
             transient_seed: false,
+            pseudo_transient: false,
+            on_rescue: None,
         }
     }
 }
@@ -223,6 +257,9 @@ fn aids_label(cfg: &NewtonConfig) -> String {
     }
     if cfg.max_damping_halvings > 0 {
         aids.push("damp");
+    }
+    if cfg.pseudo_transient {
+        aids.push("ptran");
     }
     if aids.is_empty() {
         "plain".to_string()
@@ -310,7 +347,7 @@ pub fn solve_with_events_from(
 
     // Only classify unknowns when gmin stepping is actually in play — `shunt_gmin` is a no-op
     // at `gmin == 0`, but building the classification is pointless work otherwise.
-    let kinds = if cfg.gmin_steps > 0 {
+    let kinds = if cfg.gmin_steps > 0 || cfg.pseudo_transient {
         mna::classify_unknowns(instances, dim)
     } else {
         vec![UnknownKind::Node; dim]
@@ -339,18 +376,155 @@ pub fn solve_with_events_from(
         per_abstol: &per_abstol,
         junction: &junction,
     };
+    if cfg.pseudo_transient {
+        let step_cfg = NewtonConfig {
+            max_iters: cfg.max_iters.min(PTRAN_STEP_ITERS),
+            ..cfg
+        };
+        let kinds = &kinds;
+        let linear = std::cell::RefCell::new(linear);
+        return pseudo_transient(
+            x,
+            |x, g, anchor| {
+                let c = if anchor.is_some() { step_cfg } else { cfg };
+                let mut lin = linear.borrow_mut();
+                solve_from(x, instances, dim, c, g, anchor, &class, fired, &mut lin)
+            },
+            |from, to| {
+                let f =
+                    linear
+                        .borrow_mut()
+                        .residual(instances, from, dim, fired, &cfg.analysis_ctx());
+                along_the_flow(&f, from, to, kinds, cfg.abstol)
+            },
+        );
+    }
     if cfg.gmin_adaptive && cfg.gmin_steps > 0 {
         return adaptive_ladder(x, cfg.gmin_steps, |x, gmin| {
-            solve_from(x, instances, dim, cfg, gmin, &class, fired, &mut linear)
+            solve_from(
+                x,
+                instances,
+                dim,
+                cfg,
+                gmin,
+                None,
+                &class,
+                fired,
+                &mut linear,
+            )
         });
     }
     // `gmin_for_step(step, 0)` returns `0.0` at `step == 0`, so `gmin_steps == 0` collapses
     // this to exactly one iteration at `gmin = 0` — the original, un-homotopied solve.
     for step in 0..=cfg.gmin_steps {
         let gmin = convergence::gmin_for_step(step, cfg.gmin_steps);
-        x = solve_from(x, instances, dim, cfg, gmin, &class, fired, &mut linear)?.0;
+        x = solve_from(
+            x,
+            instances,
+            dim,
+            cfg,
+            gmin,
+            None,
+            &class,
+            fired,
+            &mut linear,
+        )?
+        .0;
     }
     Ok(x)
+}
+
+/// [`NewtonConfig::pseudo_transient`]'s first pseudo-step conductance `g = C/h`, in siemens on
+/// an electrical node: the same as the `gmin` ladder's first shunt, a conductance well below a
+/// circuit's own (kΩ resistors, mS transconductances) yet large enough that a step from a point
+/// with no nearby root moves only a little.
+pub const PTRAN_G_START: f64 = 1e-3;
+
+/// The pseudo-step conductance below which the march counts as settled and the unshunted
+/// solve is tried: the end of the `gmin` ladder's ramp.
+pub const PTRAN_G_END: f64 = 1e-12;
+
+/// The largest pseudo-step conductance: a step that still fails here is a time step so short
+/// (`h = C/g`) that the march has stopped, and the solve fails.
+pub const PTRAN_G_MAX: f64 = 1e3;
+
+/// How many pseudo-steps the march may take, accepted and rejected together, before it gives
+/// up. The march is the last tier of a rescue, so it is bounded rather than run to the end.
+pub const PTRAN_MAX_STEPS: usize = 2000;
+
+/// Newton iterations allowed per pseudo-step. A step that needs more is one whose `h` is too
+/// long, and it is cheaper to shorten `h` than to keep iterating; the final unshunted solve
+/// keeps the caller's full budget.
+pub const PTRAN_STEP_ITERS: usize = 50;
+
+/// Pseudo-transient continuation ([`NewtonConfig::pseudo_transient`]): march from `x0` by
+/// backward Euler with a capacitance from every node to ground, then solve unshunted.
+///
+/// `stage(x, g, anchor)` runs one Newton solve from `x` of `f(x) + g·(x − anchor) = 0` (with
+/// `anchor = None` and `g = 0` the plain equations) and returns the solution and its iteration
+/// count — a parameter so the schedule can be tested on its own.
+///
+/// The schedule: a step that converges becomes the next anchor, and `g` falls by 4 when it
+/// took at most [`ADAPTIVE_FAST_ITERS`] iterations (the march is coasting: lengthen `h`), by 2
+/// otherwise. A step that fails is retried from the last anchor with `g` raised by 4. When `g`
+/// has fallen below [`PTRAN_G_END`] the unshunted solve is tried from the current point; if it
+/// fails there (the march has not settled yet), `g` goes back up and the march continues.
+///
+/// **A step must follow the flow.** Backward Euler with a long step does not grow an unstable
+/// mode, it damps it (its amplification `1/(1 − hλ)` is below one for `hλ > 2`), so a march
+/// that coarsens freely can step straight onto an unstable equilibrium — measured: started
+/// beside the middle root of a bistable cubic it landed on that root. So a converged step is
+/// accepted only if `forward(anchor, x)` says it moved along the circuit's own flow
+/// `−f(anchor)` ([`along_the_flow`]); otherwise it is rejected like a failed step and retried
+/// shorter. The test can always be met: as `h` shrinks a backward-Euler step tends to the
+/// forward one, `−h·f/C`, which follows the flow by construction.
+fn pseudo_transient(
+    x0: Vec<f64>,
+    mut stage: impl FnMut(Vec<f64>, f64, Option<&[f64]>) -> Result<(Vec<f64>, usize), CoreError>,
+    mut forward: impl FnMut(&[f64], &[f64]) -> bool,
+) -> Result<Vec<f64>, CoreError> {
+    let mut anchor = x0;
+    let mut g = PTRAN_G_START;
+    let mut last_err = CoreError::NoConvergence {
+        iters: 0,
+        residual: f64::NAN,
+    };
+    for _ in 0..PTRAN_MAX_STEPS {
+        if g < PTRAN_G_END {
+            match stage(anchor.clone(), 0.0, None) {
+                Ok((x, _)) => return Ok(x),
+                Err(e) => {
+                    last_err = e;
+                    g = PTRAN_G_END * 16.0;
+                    continue;
+                }
+            }
+        }
+        match stage(anchor.clone(), g, Some(&anchor)) {
+            Ok((x, _)) if !forward(&anchor, &x) => {
+                g *= 4.0;
+                if g > PTRAN_G_MAX {
+                    return Err(last_err);
+                }
+            }
+            Ok((x, iterations)) => {
+                anchor = x;
+                g /= if iterations <= ADAPTIVE_FAST_ITERS {
+                    4.0
+                } else {
+                    2.0
+                };
+            }
+            Err(e) => {
+                last_err = e;
+                g *= 4.0;
+                if g > PTRAN_G_MAX {
+                    return Err(last_err);
+                }
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// In [`NewtonConfig::gmin_adaptive`], a stage that converges in at most this many Newton
@@ -456,15 +630,17 @@ impl Linear {
         dim: usize,
         fired: &va_abi::FiredEvents,
         gmin: f64,
+        anchor: Option<&[f64]>,
         kinds: &[UnknownKind],
         cost: &mut StepCost,
     ) -> Result<(f64, Vec<f64>), CoreError> {
+        let shunt_at = shunt_point(x, anchor);
         *cost = StepCost::default();
         let t0 = std::time::Instant::now();
         match self {
             Linear::Dense => {
                 let mut sys = mna::assemble_with_events(instances, x, ctx, dim, fired);
-                sys.shunt_gmin(x, gmin, kinds);
+                sys.shunt_gmin(&shunt_at, gmin, kinds);
                 let residual_norm = inf_norm(&sys.residual);
                 let neg_f: Vec<f64> = sys.residual.iter().map(|v| -v).collect();
                 cost.assemble_ms = ms_since(t0);
@@ -475,7 +651,7 @@ impl Linear {
             }
             Linear::Sparse { sys, lu, .. } => {
                 sparse::assemble_into(instances, x, ctx, fired, sys);
-                sys.shunt_gmin(x, gmin, kinds);
+                sys.shunt_gmin(&shunt_at, gmin, kinds);
                 let residual_norm = inf_norm(sys.residual_values());
                 let neg_f: Vec<f64> = sys.residual_values().iter().map(|v| -v).collect();
                 cost.assemble_ms = ms_since(t0);
@@ -494,6 +670,26 @@ impl Linear {
         }
     }
 
+    /// The unshunted residual `f(x)` itself, for the pseudo-transient march's flow test
+    /// ([`along_the_flow`]); on the sparse path assembled into the trial system, so the
+    /// iterate's is not disturbed.
+    fn residual(
+        &mut self,
+        instances: &[&dyn ModelInstance],
+        x: &[f64],
+        dim: usize,
+        fired: &va_abi::FiredEvents,
+        ctx: &va_abi::AnalysisCtx,
+    ) -> Vec<f64> {
+        match self {
+            Linear::Dense => mna::assemble_with_events(instances, x, ctx, dim, fired).residual,
+            Linear::Sparse { trial, .. } => {
+                sparse::assemble_into(instances, x, ctx, fired, trial);
+                trial.residual_values().to_vec()
+            }
+        }
+    }
+
     /// The residual's infinity norm at trial point `x`, with `gmin` shunted — all
     /// [`damped_scale`] needs, and on the sparse path without a `dim²` buffer.
     #[allow(clippy::too_many_arguments)]
@@ -504,18 +700,20 @@ impl Linear {
         dim: usize,
         fired: &va_abi::FiredEvents,
         gmin: f64,
+        anchor: Option<&[f64]>,
         kinds: &[UnknownKind],
         ctx: &va_abi::AnalysisCtx,
     ) -> f64 {
+        let shunt_at = shunt_point(x, anchor);
         match self {
             Linear::Dense => {
                 let mut sys = mna::assemble_with_events(instances, x, ctx, dim, fired);
-                sys.shunt_gmin(x, gmin, kinds);
+                sys.shunt_gmin(&shunt_at, gmin, kinds);
                 inf_norm(&sys.residual)
             }
             Linear::Sparse { trial, .. } => {
                 sparse::assemble_into(instances, x, ctx, fired, trial);
-                trial.shunt_gmin(x, gmin, kinds);
+                trial.shunt_gmin(&shunt_at, gmin, kinds);
                 inf_norm(trial.residual_values())
             }
         }
@@ -542,6 +740,7 @@ fn solve_from(
     dim: usize,
     cfg: NewtonConfig,
     gmin: f64,
+    anchor: Option<&[f64]>,
     class: &Classification<'_>,
     fired: &va_abi::FiredEvents,
     linear: &mut Linear,
@@ -570,17 +769,18 @@ fn solve_from(
         // be answered anywhere earlier than here.
         let ctx = cfg
             .analysis_ctx()
-            .with_sim(sim.at_iteration(iteration, gmin));
+            .with_sim(sim.at_iteration(iteration, if anchor.is_some() { 0.0 } else { gmin }));
         // Assemble, shunt, and solve J · dx = −f, dense or sparse.
-        let (residual_norm, dx) =
-            match linear.step(instances, &x, &ctx, dim, fired, gmin, kinds, &mut cost) {
-                Ok(v) => v,
-                Err(e) => {
-                    log.add(&cost, 0.0);
-                    log.stage(iteration + 1, &format!("failed: {e}"));
-                    return Err(e);
-                }
-            };
+        let (residual_norm, dx) = match linear.step(
+            instances, &x, &ctx, dim, fired, gmin, anchor, kinds, &mut cost,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                log.add(&cost, 0.0);
+                log.stage(iteration + 1, &format!("failed: {e}"));
+                return Err(e);
+            }
+        };
 
         let trial_start = std::time::Instant::now();
         // Apply the step, optionally damped: `scale` is 1.0 unless the full step made the
@@ -592,6 +792,7 @@ fn solve_from(
             dim,
             cfg,
             gmin,
+            anchor,
             kinds,
             vt,
             vcrit,
@@ -800,6 +1001,7 @@ fn damped_scale(
     dim: usize,
     cfg: NewtonConfig,
     gmin: f64,
+    anchor: Option<&[f64]>,
     kinds: &[UnknownKind],
     vt: f64,
     vcrit: f64,
@@ -831,6 +1033,7 @@ fn damped_scale(
             dim,
             fired,
             gmin,
+            anchor,
             kinds,
             &cfg.analysis_ctx(),
         ) < residual_norm
@@ -850,6 +1053,45 @@ fn node_step(step: f64, kind: UnknownKind, max: f64) -> f64 {
         step.clamp(-max, max)
     } else {
         step
+    }
+}
+
+/// Whether the move `from → to` goes along the flow `−f(from)` of the pseudo-transient
+/// dynamics `C·dx/dt = −f(x)` on the node rows: `Σ f_i·(to_i − from_i) ≤ 0`, with a rounding
+/// allowance. Branch rows (constraints, not capacitor-charged nodes) are left out.
+///
+/// From an anchor that is already an equilibrium — every node row's residual within `abstol`,
+/// Newton's own convergence test — there is no flow to follow, and the sign of `f·Δ` is
+/// rounding noise (measured on the Schmitt trigger: |f| = 3e-17, |Δ| = 1e-15, every other step
+/// rejected, the march stuck there for its whole budget); such a step is always accepted.
+fn along_the_flow(f: &[f64], from: &[f64], to: &[f64], kinds: &[UnknownKind], abstol: f64) -> bool {
+    let settled = f
+        .iter()
+        .zip(kinds)
+        .all(|(v, k)| *k != UnknownKind::Node || v.abs() <= abstol);
+    if settled {
+        return true;
+    }
+    let (mut dot, mut ff, mut dd) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for i in 0..f.len() {
+        if kinds[i] == UnknownKind::Node {
+            let d = to[i] - from[i];
+            dot += f[i] * d;
+            ff += f[i] * f[i];
+            dd += d * d;
+        }
+    }
+    dot <= 1e-9 * (ff * dd).sqrt()
+}
+
+/// The vector a shunt of conductance `g` acts on: `x` itself for the `gmin` ladder (a shunt to
+/// ground, current `g·x`), `x − anchor` for a pseudo-transient step (a capacitor charged to
+/// `anchor`, current `g·(x − anchor)`; [`NewtonConfig::pseudo_transient`]). Borrowed in the
+/// first case, so the ladder and the plain solve copy nothing.
+fn shunt_point<'a>(x: &'a [f64], anchor: Option<&[f64]>) -> std::borrow::Cow<'a, [f64]> {
+    match anchor {
+        None => std::borrow::Cow::Borrowed(x),
+        Some(a) => std::borrow::Cow::Owned(x.iter().zip(a).map(|(x, a)| x - a).collect()),
     }
 }
 

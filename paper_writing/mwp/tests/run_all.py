@@ -23,7 +23,8 @@ TITLES = {
     "t09": "Dispersion inside the band: all-pass chain against the fibre fading curve",
     "t10": "Optical amplifier: gain saturation, signal-spontaneous beat noise",
     "t11": "Noise in the time domain: library module against the simulator's --tran-noise",
-    "t12": "Golden reference: verilog-a-sim against Cadence Spectre's committed outputs",
+    "t12": "Golden reference: verilog-a-sim against Cadence Spectre's outputs (kept locally)",
+    "t13": "Electrical loads for co-design: modulator electrode admittance, photodiode junction pole",
 }
 
 

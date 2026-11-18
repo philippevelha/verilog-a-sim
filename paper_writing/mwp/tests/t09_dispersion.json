@@ -1,7 +1,7 @@
 {
  "test": "t09_dispersion",
  "ok": true,
- "wall_s": 8.34,
+ "wall_s": 6.32,
  "rows": [
   {
    "note": "first fading null at 12.12 GHz"
@@ -95,7 +95,7 @@
    "note": "12 sections: beyond the fitted band the response departs from the fibre by more than 0.1 at 21.4 GHz"
   },
   {
-   "note": "cost: 12 sections = 24 extra unknowns; AC 251 points in 0.13 s"
+   "note": "cost: 12 sections = 24 extra unknowns; AC 251 points in 0.10 s"
   }
  ]
 }

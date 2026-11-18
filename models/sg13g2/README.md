@@ -17,7 +17,10 @@ circuit.
   `va-cli check --codegen`: 4 ports, 13 nodes, 887 parameters.
 - `sg13g2_cards.py` — turns the PDK's ngspice libraries (`sg13g2_moshv_parm.lib`,
   `cornerMOShv.lib`, the `sg13g2_moshv_mod.lib` wrapper) into flat `.model` cards va-cli reads,
-  one per device geometry, plus the instance line. It needs the PDK checked out at
+  one per device geometry, plus the instance line. Since 2.56.0+2 also the core 1.2 V devices
+  (`flavour="lv"`: `sg13g2_moslv_parm.lib`, `cornerMOSlv.lib`; the wrappers share the geometry
+  constants), used by `paper_writing/codesign`. An NMOS of W/L = 10/0.13 µm at V_GS = V_DS = 1.2 V
+  gives 4.31 mA, a PMOS 2.08 mA (smoke test, not a validation). It needs the PDK checked out at
   `external/ihp-open-pdk` (gitignored):
 
       git clone --depth 1 --filter=blob:none --sparse https://github.com/IHP-GmbH/IHP-Open-PDK external/ihp-open-pdk

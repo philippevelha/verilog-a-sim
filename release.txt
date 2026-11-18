@@ -22,6 +22,294 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.58.0 - 2026-11-18
+-------------------
+**Pseudo-transient continuation, a fourth DC rescue tier; every change of rescue method is a
+warning; a failed `.dc` sweep prints the points it had** (user, 2026-11-18; 101-circuits C2).
+- C2 (emitter-coupled Schmitt trigger, `.dc` downward) was not fixed, only hidden by its 2 mV grid.
+  Its fold is between 1.75153 and 1.75152 V; in a ~0.5 mV window past it (1.751-1.75152 V, ragged)
+  Newton stops at the ghost of the ended branch (residual 5.7e-9), from the previous point and from
+  zero, and all three gmin tiers stop there too. A 10 uV sweep failed at 1.75152 V.
+- New last tier (`NewtonConfig::pseudo_transient`, va-core): backward Euler in fictitious time with
+  a capacitance from every node to ground, from the same start, then an unshunted solve. Every
+  window point now lands on the remaining branch (c1 4.321891 V, the up-sweep's value) in ~2 s; the
+  10 uV sweep runs 1501/1501. A pseudo-step must move along the circuit's flow (f.dx <= 0 on node
+  rows): without that test a long BE step damped the unstable mode and the march landed on a
+  bistable cubic's middle root (measured; now the stable root). The test is skipped from an anchor
+  already within abstol, where its sign is rounding noise (it stalled the march for 2000 steps at
+  |f| = 3e-17 before that rule). Limits: a heuristic, not a stability proof, for a non-symmetric
+  Jacobian; an equilibrium unstable through a complex pair is not detected.
+- W0603 (a method failed, the next is tried), W0604 (a gmin tier solved), W0605 (pseudo-transient
+  solved: a stable state reached from <start>) at every DC solve: .op, .dc points, .ac/.noise bias,
+  the .tran seed, the .nodeset pre-solve. In a sweep, the restart from zero after every method
+  failed from the previous point is a W0603 too, and only the first 10 points that need the rescue
+  are printed in full; later ones are counted in one closing note.
+- A `.dc` sweep that fails prints every converged point first, then the error (it printed none).
+- Cost: none on a solve that converges (the tier is reached only after the three ladders fail);
+  a sweep point whose previous-point rescue fails now pays the march before the cold restart.
+- Not changed: the cold `.op` inside the band (e.g. 2.5 V) still lands on the unstable middle
+  root (c1 3.81 V, out 1.74 V): plain Newton converges there, so no rescue runs.
+- Measured: cargo test --workspace 1070 passed (before the 2 new tests; va-core 85, va-cli
+  dc_rescue 1, render 1 after), clippy clean; xtask validate 33/33, convergence 100 %, no W0603-5
+  in any gate (no gate reaches the changed path). 101-circuit reproducers: no status change; new
+  warnings show silent gmin rescues in C2, C5 and the seed operating points of D5, D7.
+- docs/roadmap.md (T3.3): the 2.58.0 tier order and its limits are recorded; "source stepping is
+  blocked" is corrected. Interface beta has had `AnalysisCtx::sim.source_scale_factor` since
+  0.9.12, so nothing blocks it, but it is still not built: va-core always passes 1.0 and no source
+  reads it.
+- **E060A: an underflow caused by the Newton tolerance says so** (101-circuits D12/D14; user,
+  2026-11-18: "the user should know when the issue is the tolerance and think about it").
+  - What happened: both decks stopped in under a second with E0605. That is not a regression:
+    neither has run at any version. At 2.48-2.49 they stopped with E0609, and the E0605 came
+    with 2.50.0's lower step floor (bisected).
+  - The cause: each step's Newton solve reaches the answer by iteration 2 (|f| ~2e-11), then
+    bounces at the rounding floor for the rest of its budget. The default newton_reltol 1e-9
+    and the 1e-12 absolute residual ask for more digits than floating point gives there.
+  - Halving the step cannot help, because the companion's 1/h terms amplify the noise. The
+    stall rule, which accepts such a solve, applies only at the minimum step, where the
+    residual is by then too large.
+  - Now `newton_step` records a failure at the floor: the stall test is met, but the step is
+    not at the minimum step. The record is kept until the run gets one tstep past it. An
+    underflow in that window is `TransientError::NewtonToleranceFloor`, reported as E060A,
+    which gives the residual reached and the tolerance, and suggests trying two tolerances
+    and comparing.
+  - Nothing is loosened by default: choosing an accuracy is the user's call.
+- The reproducers carry `--newton-reltol 1e-6` (external/, local), and both now run:
+  - D14 in 22 s (66 135 points). At 1e-7 too; the two agree within 0.03 % of range.
+  - D12 in 0.6 s, with the gate bootstrapped to 23.1 V and the output at 11.87 V of 12 V.
+    1e-5, 3e-7 and 2e-7 agree within 0.05 % of range. 1e-7 still gives E060A.
+- Not this cause: D13's E0609 had no floor failures in its stalled block (measured).
+- Checked: a test-only capacitor whose charge bounces by 1e-15 C each Newton iteration gives
+  E060A. It gives a plain E0605 with the recording disabled, and the run completes without
+  the bounce.
+- The earlier prototype (the stall rule at every step size) was not adopted. Its D13 "cost"
+  was measured with the wrong integration flag, so it was not a real cost.
+- Measured with all of the above: cargo test --workspace --release 1073 passed, 0 failed;
+  clippy clean; xtask validate 33/33, convergence 100 %.
+
+2.57.0+5 - 2026-11-17
+---------------------
+**Q against the receiver filter's cutoff** (user, 2026-11-17). The cutoff is a parameter
+everywhere: `--fc a,b,c` or `--fc start:stop:step` (Hz) on `--eye-figures`, `--eye-cutoffs` and the
+new `--q-vs-cutoff` (default 0.75-5 GHz in 0.25 GHz steps). The last writes
+spectre/q_vs_cutoff.json and figures/fig_q_vs_cutoff: eye Q and noise-only Q for both simulators,
+ISI-only Q (noiseless), and the static `.noise` Q weighted by the same |H|^2 (`compare.static_q`;
+`noise.rx_h2` takes `fc`). Spectre outputs stay local (results4/).
+- Eye Q, verilog-a-sim against Spectre, agrees within 3.3 % at every cutoff. Jitter runs 3-10 %
+  low at and above 1.25 GHz, growing with the cutoff (the generator-bandwidth difference of 2.57.0+1).
+- **Q peaks at 2.0-2.25 GHz (23.1 / 23.4).** Below that the filter's ISI limits it (ISI-only Q 4.6
+  at 0.75 GHz, 25 at 1.5 GHz). Above, the noise does: 16.7 at 5 GHz. The paper's 1.5 GHz
+  (0.75 x the bit rate) sits on the ISI-limited side, Q 17.3. The static `.noise` estimate stays
+  below the eye's noise-only Q at every cutoff (1.1-1.5x), the thermally compressed swing again.
+- Check: static Q at 1.5 GHz is 19.71, as in the budget.
+
+2.57.0+4 - 2026-11-17
+---------------------
+`spectre/compare.py --eye-cutoffs`: the TIA-output eye at 1.5, 2 and 2.5 GHz receiver cutoffs side
+by side, on identical axes (user, 2026-11-17). Writes figures/fig_eye_cutoffs_{vasim,spectre} (one
+row each) and figures/fig_eye_cutoffs (2 x 3, simulators as rows). Same traces and statistics as
+`--eye-figures`; no new numbers. Local only.
+
+2.57.0+3 - 2026-11-17
+---------------------
+`spectre/compare.py --eye-figures --fc 2e9,2.5e9` writes the eye pair at other receiver cutoffs
+(figures/fig_eye_{vasim,spectre}_bessel<f>GHz), for slides (user, 2026-11-17). `noise.rx` and
+`noise.rx_filter` take `fc`; the paper's 1.5 GHz default is unchanged. V(to), two seeds averaged,
+verilog-a-sim against Spectre: at 2 GHz sigma 267 / 260 uV, Q 23.1 / 23.4, jitter 4.1 / 4.3 ps;
+at 2.5 GHz 296 / 288 uV, Q 21.8 / 22.3, jitter 3.8 / 4.0 ps. Sigma and Q within 2.7 % at both;
+jitter -5.8 % at 2 GHz and -6.5 % at 2.5 GHz (-4.1 % at 1.5 GHz). The jitter gap grows with the
+cutoff, as more of the band where the generators differ gets through. Local only.
+
+2.57.0+2 - 2026-11-17
+---------------------
+**The codesign paper's eye figures are read behind a reference receiver filter; eye figures
+for slides, one per simulator.** (user, 2026-11-17)
+- `noise.rx`: a 4th-order Bessel at 0.75 x the bit rate (1.5 GHz) on a 1 ps grid. Eye sigma, Q
+  and jitter at V(to) are read behind it. The `.noise` prediction and the static Q-versus-loss
+  curve are weighted by the same |H|^2. V(out), the driver output, stays unfiltered. Why:
+  unfiltered, the figures depend on the transient-noise generator's bandwidth above the TIA's
+  band, where verilog-a-sim and Spectre differ (2.57.0+1). Behind the filter they agree within 5 %.
+- New figures: eye sigma 209-248 uV against 223/234 uV from `.noise`; Q 17.3 (noise and ISI; ISI
+  alone 25, noise alone 26-28); jitter 4.6 ps; Spectre Q 17.3, jitter 4.8 ps. Static Q 19.7 at
+  0 dB, crossing Q = 7 at about 6.5 dB. Static against the eye's noise alone is now 1.4x
+  pessimistic (was 2x).
+- Cost: the filter's ISI is part of the eye now (noiseless Q 131 -> 25), and the earlier
+  unfiltered Q 12 and the "2-3 dB to Q = 7" extrapolation are withdrawn. Unfiltered statistics
+  stay in the eye JSON under "unfiltered".
+- `spectre/compare.py --eye-figures` writes figures/fig_eye_{vasim,spectre}[_unfiltered].{pdf,png}:
+  one eye per simulator, identical axes, for side-by-side slides. They are accuracy material from
+  Spectre outputs (NDA: publishable; no speed or memory). `compare.py --noise` still gives 66 of 69,
+  now through the same `noise.rx`. `noise.eye_stats` adds `q_noise`.
+- Simulator code unchanged (2.57.0 test and validate figures stand). Local only (abstract not yet
+  approved).
+
+2.57.0+1 - 2026-11-17
+---------------------
+**The codesign noise decks checked against Spectre (fourth server run, all 38 decks exit 0).**
+`paper_writing/codesign/spectre/compare.py --noise` (new) compares the 13 noise decks; the bar is
+5 %, every difference reported (user, 2026-11-17): 66 of 69 rows within it.
+- Within 4.1e-7 V (operating points) and 2.6e-4 (`.noise` PSD, total and per-device at the driver
+  output; case 2's ring temperature and monitor, loop closed and open). The noiseless 2 Gb/s eye:
+  RMS difference 1.6e-4 of the swing.
+- **Found: the PSD at the TIA output runs high above 1 GHz (+0.8 % at 10 GHz, +3.9 % at 100 GHz;
+  total +0.6 %), and the cause is ours.** PSP103 correlates drain and induced gate noise through
+  `migid*I(NOII)`, a probe of a branch whose only contribution is `white_noise`. An `I(branch)`
+  probe of a flow branch reads its accumulator row (`stamp_flow_current_accumulators`), and
+  `noise()` injects sources into the branch's KCL rows only, so the probe sees no noise and the
+  correlation is dropped, in `.noise` and `--tran-noise` alike. Proven by rewriting that line through
+  node probes (KCL at NOI): the PSD then matches Spectre's to 5e-6. Not fixed here. The fix puts
+  the source on the accumulator row too, which needs a three-row source in `NoiseSink`, an
+  Interface beta change (CLAUDE.md section 6).
+- **The unfiltered noisy eye differs beyond 5 % (sigma -7 %, Q +7 %, jitter -27 %), and the cause is
+  the generators' bandwidth, not the circuit.** Below 6 GHz both simulators' noise at V(to) agrees
+  within 0-5 % per band. From 6 to 25 GHz ours rolls off as sinc^4 (linear interpolation, as
+  documented), and Spectre's `noisefmax` generator rolls off less. V(to) has 0.40 mV rms of noise
+  there. Behind a 4th-order Bessel receiver filter at 1.5 GHz they agree: +1.4 % / +0.2 % / -4.1 %.
+  The README now gives Spectre's figures next to ours (Q 11.0 against 11.8).
+- `noise.eye_stats` is factored out of `noise.eye`, so both simulators' waveforms get the same
+  measurement; the stored results reproduce byte for byte. The README's Spectre section,
+  limitations and Q paragraph are updated.
+- Spectre outputs stay local (results4/ and the archive are gitignored; NDA). Simulator code is
+  unchanged, so the 2.57.0 test and validate figures stand. Local only (abstract not yet approved).
+
+2.57.0 - 2026-11-17
+-------------------
+**Transient noise generates flicker sources, and runs compact-model circuits it could not
+start.** Found putting noise into the codesign microring driver (paper_writing/codesign,
+`noise.py`): `--tran-noise` left every 1/f source out, and on the SG13G2 PSP103 driver it did not
+get past t = 0.
+
+- **Flicker in the time domain** (`va_transient::noise`): a `flicker_noise(coeff, e)` source is a
+  sum of sinusoids, one per band, 10 bands per decade from `--tran-noise-fmin` (new; default
+  1/(run length)) to fmax/4, each with Gaussian coefficients and a log-uniform frequency drawn from
+  the same stateless hash as the white samples. Variance = ∫ coeff/f^e df over the band, spectrum
+  right per band (tests: ensemble variance for e = 0.8, 1, 2; a periodogram independent of the
+  construction; the integrator's node voltage equal to the synthesized current through 1 kΩ).
+  PSP's 1/f, a laser linewidth (e = 2) and BSIM-style KF noise are now in a noisy transient.
+  W0602 (rev 2) now names only tabulated sources, and flicker when its band is empty.
+- **The noise is ramped in over the first sample.** The first step met every source at its
+  t = 0 value as a step input; PSP103's charge rows turned that into a step controller that
+  never left t = 0 (a single HV NMOS on at Vds = 0: no result in minutes; the driver: E0605 at
+  t = 0). Now every source is i(t)·min(1, t/dt) from the noiseless operating point. Two
+  alternatives were tried and dropped: solving the operating point with the sources' t = 0
+  currents, cold (one seed in two gave E0603, a density read far from any solution) and warm
+  from the noiseless point (it treats one broadband sample, variance S·fmax, as DC: the last node
+  of t11's 50-section RC ladder read 17x kT/C over a microsecond; with the ramp, 4 %).
+  Statistics should discard each node's own settling from the noiseless start, as before.
+- **Densities follow the bias continuously and cheaply.** They are evaluated at each sample
+  instant (now a breakpoint, registered through the event channel like `zi_*`) and interpolated
+  linearly through the segment, so the injected current is a function of time alone. Two
+  designs were measured and dropped on the driver: re-evaluating at every Newton iterate (2.55.0)
+  doubled the model evaluations and left the amplitude's x-dependence out of the Jacobian (a noisy
+  timepoint cost 6x a clean one); holding the density from one accepted point to the next made it
+  jump there, and on a switching edge, where densities change by decades, the run died of E0605 at
+  1.02 ns. Cost now, 6 ns of the driver deck: 16 s noisy against 11 s clean (was 33x on 2 ns).
+  Cost of the design: a density lags its bias by at most two samples (1/fmax); a statistic
+  taken during an edge sees the noise switch that much late.
+- `mrm_tcmt` (paper 3's ring, both copies) declares its noise: thermal noise of Rs, RSi and the
+  heater, junction shot noise, and the thermal node's thermodynamic fluctuation (4kT^2/Rth). No
+  effect outside noise analyses (case 2's operating point unchanged, 0.672587 V).
+- Regression fixtures: `crates/va-cli/tests/fixtures/tran_noise_psp_hv_{vds0,inverter}.net` (IHP
+  open-PDK cards inline), both shown to fail with the step at t = 0 (no result in 40-60 s) and to
+  run in 1-2 s with the ramp. The inverter also guards the edge continuity, though the dropped
+  held-density variant no longer exists to be shown failing.
+
+- The codesign Spectre package (`paper_writing/codesign/spectre`, 25 -> 38 netlists) carries the
+  13 noise decks: driver chain op and `.noise` at both levels, the 2 Gb/s eye clean and with
+  Spectre's transient noise (same band), case 2's `.noise` loop open and closed. The 25 earlier
+  netlists are byte-identical to the last server run. Not yet run on the server.
+
+Validated against `.noise` on the codesign driver + ring + receiver (256 ns PRBS7, two seeds): the
+noise sigma at the TIA output's bit centres is 526-592 uV against 607-623 uV predicted for the same
+band and generator shape (sinc^4), the rest of the gap explained by the ring's thermal state
+(README). Not validated against a reference simulator. Limits: tabulated sources still left out;
+flicker discrete per band (a spectral estimate finer than 26 % of a frequency sees lines) and
+absent below fmin and above fmax/4; a UIC run still meets the noise as a step.
+
+Measured at this version: `cargo test --workspace --release` 1067 passed, 0 failed, 0 ignored;
+`cargo xtask validate` 33/33, convergence 100 %. Local only (abstract not yet approved).
+
+
+2.56.0+5 - 2026-11-16
+---------------------
+**eye.py runs long enough to see the ring heat** (paper_writing only; no simulator change).
+`--time <s>` repeats the PRBS7 to fill the duration (adding to t_stop alone held the last bit
+for the rest of the run), `--loads` picks the loads, and the ring's temperature is reported: va-cli
+prints a thermal node as `Temp(tdt)=... K`, which the mwp harness's V/I parser silently drops.
+  * The thermal model works: ring alone at DC, dT 0.787 K at 0 V and 0.558 K at 3.3 V
+    (self_heat=0: 0 K, and the through-port power at 0 V drops 0.685 -> 0.315 mW). An ideal 2 Gb/s
+    square wave for 10 us (ring alone, 3.5 M points, 3 min 20 s): dT 0.787 -> 0.734 K, optical
+    low level 0.638 -> 0.622 mW, high 0.891 -> 0.885 mW. The drift is real, and small at 1 mW.
+  * With the transistor driver: 100 ns, dT 0.7867 -> 0.7841 K. 10 us would take ~2.5 h.
+  * Cost: none; the default (one period, all three loads) is unchanged.
+
+
+2.56.0+4 - 2026-11-16
+---------------------
+**Microring driver eye diagrams** (paper_writing only; no simulator change).
+paper_writing/codesign/eye.py -> figures/fig_driver_eye: 2 Gb/s PRBS7 (one period, first 8 bits
+dropped), three loads (open, ideal 50 ohm to ground, the mrm_tcmt ring) + the ring's optical eye.
+driver.deck gains `load` and `bits` (a PWL input).
+  * Eye height / width: open 3.29 V / 276 ps; 50 ohm 0.20 V / 206 ps (supply 2.0 mA: the 20/8 um
+    output stage cannot drive 50 ohm); ring 3.29 V / 272 ps; optical 0.130 mW / 293 ps.
+  * The driver has ~200 ps of duty-cycle distortion at 2 Gb/s (a high level lasts ~295 of 500 ps,
+    270 ps into 50 ohm): the OTA slews unequally and o1 is not centred on the inverter threshold.
+    Edge jitter (ISI) ~20 ps.
+  * The ring's thermal time constant (Rth*Cth = 5 us) is ~80x the run: its temperature stays at
+    the operating point's, so the optical levels depend on the first bit (0.685/0.816 mW here,
+    0.608/0.777 mW in 2.56.0+3's run that started at the other level).
+  * Measured: three runs of ~38,500 timepoints, 51-60 s each.
+
+
+2.56.0+3 - 2026-11-16
+---------------------
+**Microring driver, transistor level** (paper_writing only; no simulator change).
+paper_writing/codesign/driver.py: microring_driver_sg13g2.cir (HV diff pair + PMOS mirror,
+3-inverter taper) with SG13G2 HV PSP103 cards, loading the mrm_tcmt ring (Rs 100, Cj0 20 fF,
+Cpad 10 fF; driver on the cathode, 0-3.3 V reverse bias; laser 1 mW at 1549.95 nm).
+  * At 1 Gb/s: V(out) 10-90 % rise 66.6 ps, fall 61.8 ps (the .cir's 0.33/2.97 V: 61.1/57.2 ps);
+    through-port power rise 48.6 ps, fall 55.8 ps; 0.66 mA from 3.3 V. Same at 2 Gb/s within 3 ps.
+  * The netlist as drawn does not run at its own 10 Gb/s: the mirror OTA slews 200 uA into ~90 fF
+    (o1 moves ~0.2 V per bit) and out sticks after one edge; from 3 Gb/s it no longer switches
+    cleanly. A 10-20x tail current speeds o1 but the 1.2/3 um first inverter then fails to swing
+    o2 across the next threshold: 10 Gb/s needs a front-end redesign, not a bias change.
+  * Not validated against a reference simulator (HV cards: the README's smoke test only).
+  * Measured: these runs, verilog-a-sim 2.56.0+2 binary, 4-9 s each.
+
+
+2.56.0+2 - 2026-11-14
+---------------------
+**Electronic-photonic co-design cases with open-PDK transistors** (paper_writing and the SG13G2
+card generator; no simulator change). paper_writing/codesign/, paper_writing/mwp/lib,
+models/sg13g2/sg13g2_cards.py.
+  * Library: mwp_mzm gains `cel` (electrode capacitance, the load a driver sees) and mwp_pd `cj`
+    (junction capacitance, the load a TIA sees), both default 0 so every existing result is
+    unchanged. New test t13 against closed forms; the MWP suite is 158/158.
+  * sg13g2_cards.py generates the PDK's core 1.2 V devices too (`flavour="lv"`); the 3.3 V cards
+    are unchanged.
+  * Three cases for the conference paper, electronics at transistor level in SG13G2 (ideal parts
+    stated: case 1's output buffer and DC-servo error amplifier):
+    1. RF photonic link: SFDR has an optimum optical power that moves with the modulator's V_pi
+       (104.4 dB Hz^2/3 at 5-10 mW for 1 V, >= 20 mW for 4 V); the receiver's DC photocurrent
+       dictates a cancellation device whose size trades headroom for bandwidth (4.0 -> 3.2 GHz).
+    2. Microring thermal lock: settles in 0.9-15 us with C_int 2-80 pF; larger C_int rings (the
+       OTA on a capacitor is a lag pole, not an integrator); a 5.5-9 mV steady error from the
+       OTA's finite gain.
+    3. Photonic down-converter: carrier suppression removes the DC photocurrent, so the receiver
+       needs no cancellation device and converts ~3 dB better (-11.2 against -14.0 dB).
+  * Found while building them, and fixed before any number was kept: a 40 um cancellation PMOS
+    whose ideal servo drove its gate below ground (now flagged by case1.servo_ok); IMD3 taken
+    too high (-20 dBm per tone, where higher orders bend the slope; now -35 dBm); a node-name
+    collision between the shared receiver and case 3's LO.
+  * The same 13 decks in Spectre (paper_writing/codesign/spectre, outputs kept local): after two
+    server runs all 28 accuracy checks agree, which also checks the SG13G2 core-device cards.
+    Operating points within 5e-7 V, AC within 6e-4, noise 1.6e-4, IMD3 0.005 dB, step responses
+    2.6e-4 of the swing, mixer IF outputs 0.017 dB. On the way: Spectre's default step control
+    under-resolved the 82 dB-down IMD3 (1.2 dB off until maxstep=1e-12); the first package shipped
+    the ring model's verilog-a-sim copy, whose disciplines.vams lacks `thermal`; and the ring decks'
+    0.1 us step under-resolved the laser-step edge on our side (sweep and figure now 0.01 us).
+
+
 2.56.0+1 - 2026-11-13
 ---------------------
 **Third Spectre round for the zoo: 75 results kept, the round-2 wrong circuits fixed; one more

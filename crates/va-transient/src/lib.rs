@@ -19,6 +19,22 @@ pub enum TransientError {
     /// The timestep was cut below the minimum without meeting the LTE bound.
     #[error("timestep underflow at t={t:e}")]
     TimestepUnderflow { t: f64 },
+    /// A time step underflow whose cause is the **Newton tolerance, not the circuit** (2.58.0).
+    /// Within the last `tstep` before the underflow, a step's Newton solve did not converge, yet
+    /// its iterates had stopped moving: changes under 1e-6 relative and under a millionfold the
+    /// absolute tolerance, with a residual of at most 1e-6. That is Newton bouncing at the limit
+    /// of floating-point precision with the answer in hand. `reltol` (the run's
+    /// [`integrator::TranConfig::newton_reltol`]) asks for more digits than that, and halving
+    /// the step cannot help: the companion terms grow as 1/h and amplify the rounding noise.
+    /// `residual` is the smallest residual infinity-norm such a solve reached.
+    ///
+    /// Reported rather than worked around: a looser tolerance does let the run continue, but
+    /// it changes what every step is accepted at, which is the user's call to make.
+    #[error(
+        "timestep underflow at t={t:e}: Newton reached residual {residual:e} but not the \
+         tolerance newton_reltol={reltol:e}"
+    )]
+    NewtonToleranceFloor { t: f64, residual: f64, reltol: f64 },
     /// The stall watchdog ([`integrator::TranConfig::stall_attempts`]): `attempts` consecutive
     /// step attempts advanced time by only `advanced` seconds, less than `resolution` (the
     /// card's `tstep`, or a smaller `bound_step` a model asked for). `t` is where the run was

@@ -1,7 +1,7 @@
 {
  "test": "t12_spectre_golden",
  "ok": true,
- "wall_s": 33.4,
+ "wall_s": 30.69,
  "rows": [
   {
    "what": "01 DC transfer: max |i - Spectre| / max |i|",
@@ -154,7 +154,7 @@
    "ok": true
   },
   {
-   "note": "23: 246748 points, 30 s; Spectre's phase noise for this deck is NOT compared (open question, README)"
+   "note": "23: 246748 points, 27 s; Spectre's phase noise for this deck is NOT compared (open question, README)"
   },
   {
    "what": "29 noise of a signal plus its delayed copy, 10 MHz - 2 GHz: max relative deviation from Spectre",

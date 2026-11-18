@@ -1,0 +1,67 @@
+{
+ "test": "t13_electrical_loads",
+ "ok": true,
+ "wall_s": 0.29,
+ "rows": [
+  {
+   "what": "electrode admittance, rterm=50 ohm, cel=300 fF, 0.1-100 GHz: max |Y - (1/rterm + jwC)| / max |Y|",
+   "sim": 5.915640706960404e-05,
+   "ref": 0.0,
+   "err": 5.915640706960404e-05,
+   "tol": 0.0001,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "modulation unchanged by cel (rterm=50): max |H + s0| / s0",
+   "sim": 1.102657934069144e-07,
+   "ref": 0.0,
+   "err": 1.102657934069144e-07,
+   "tol": 1e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "electrode admittance, rterm=0 ohm, cel=300 fF, 0.1-100 GHz: max |Y - (1/rterm + jwC)| / max |Y|",
+   "sim": 2.700088486674488e-07,
+   "ref": 0.0,
+   "err": 2.700088486674488e-07,
+   "tol": 1e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "modulation unchanged by cel (rterm=0): max |H + s0| / s0",
+   "sim": 1.102657934069144e-07,
+   "ref": 0.0,
+   "err": 1.102657934069144e-07,
+   "tol": 1e-05,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "junction pole, cj=200 fF into 500 ohm (f_3dB 1.59 GHz): max |V/V0 - 1/(1 + jwRC)|",
+   "sim": 0.0001425342033873762,
+   "ref": 0.0,
+   "err": 0.0001425342033873762,
+   "tol": 0.0002,
+   "rel": false,
+   "unit": "",
+   "ok": true
+  },
+  {
+   "what": "low-frequency transimpedance |V/Vrf| = s0 R",
+   "sim": 1.5677049999999997,
+   "ref": 1.5677048496184405,
+   "err": 9.59246628865222e-08,
+   "tol": 1e-05,
+   "rel": true,
+   "unit": "V/V",
+   "ok": true
+  }
+ ]
+}

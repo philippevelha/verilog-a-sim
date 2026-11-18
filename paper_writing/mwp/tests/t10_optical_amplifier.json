@@ -1,7 +1,7 @@
 {
  "test": "t10_optical_amplifier",
  "ok": true,
- "wall_s": 0.66,
+ "wall_s": 0.64,
  "rows": [
   {
    "what": "P_in -30 dBm: gain",

@@ -1186,6 +1186,16 @@ struct StateBuffers {
     scratch: Vec<f64>,
     /// Newton solves accepted by the stall rule (`newton_step`), for `Waveform::stalled_steps`.
     stalled: usize,
+    /// A Newton solve that failed at the rounding floor (`newton_step`'s stall test met at the
+    /// end of its budget, but not at the minimum step, where the stall rule accepts it): the
+    /// smallest residual such a solve reached, and the landing time of the first one. A run that
+    /// then underflows reports [`TransientError::NewtonToleranceFloor`] instead of a plain
+    /// underflow (2.58.0). Cleared once an accepted step lands a full `tstep` past that time.
+    /// Not on every accept: a run that hits the floor typically crawls on through a few
+    /// femtosecond steps before it underflows, and the last failure, at a step so small that the
+    /// 1/h terms swamp everything, no longer looks like the floor although the floor is still the
+    /// cause (101-circuits D14).
+    floor_residual: Option<(f64, f64)>,
     /// Device bypass (`va_core::par::Bypass`), when [`TranConfig::bypass`] is on. Kept here
     /// because every assembly already carries this struct.
     bypass: Option<va_core::par::Bypass>,
@@ -1218,6 +1228,7 @@ impl StateBuffers {
             committed: vec![0.0; total],
             scratch: vec![0.0; total],
             stalled: 0,
+            floor_residual: None,
             bypass,
             on_task,
             on_file,
@@ -1547,12 +1558,34 @@ fn newton_step(
             iterations: max_iters - 1,
         });
     }
+    // Not accepted, but recorded: if the run later underflows, this is why (see
+    // `TransientError::NewtonToleranceFloor`). Recording changes nothing about the solve.
+    if stalled_for >= 2 {
+        state.floor_residual = Some(match state.floor_residual {
+            Some((r, at)) => (r.min(last_residual), at),
+            None => (last_residual, t),
+        });
+    }
 
     Err(va_core::CoreError::NoConvergence {
         iters: max_iters,
         residual: last_residual,
     }
     .into())
+}
+
+/// The error for a step that cannot shrink any further: [`TransientError::NewtonToleranceFloor`]
+/// if a Newton solve failed at the rounding floor within the last `tstep`, a plain
+/// [`TransientError::TimestepUnderflow`] otherwise.
+fn underflow(t: f64, state: &StateBuffers, reltol: f64) -> TransientError {
+    match state.floor_residual {
+        Some((residual, _)) => TransientError::NewtonToleranceFloor {
+            t,
+            residual,
+            reltol,
+        },
+        None => TransientError::TimestepUnderflow { t },
+    }
 }
 
 /// The breakpoints models have asked for, kept **sorted, without duplicates, and only those
@@ -2036,7 +2069,7 @@ fn integrate(
                     }
                     let shrunk = h * 0.5;
                     if shrunk < cfg.tstep_min {
-                        return Err(TransientError::TimestepUnderflow { t });
+                        return Err(underflow(t, &state, cfg.newton_reltol));
                     }
                     h = shrunk;
                     continue;
@@ -2128,7 +2161,7 @@ fn integrate(
                         Err(TransientError::Core(va_core::CoreError::NoConvergence { .. })) => {
                             let shrunk = h * 0.5;
                             if shrunk < cfg.tstep_min {
-                                return Err(TransientError::TimestepUnderflow { t });
+                                return Err(underflow(t, &state, cfg.newton_reltol));
                             }
                             h = shrunk;
                             continue;
@@ -2250,6 +2283,10 @@ fn integrate(
                 }
                 bracket_retries = 0;
 
+                // A full `tstep` past a floor failure, it is no longer the run's story.
+                if matches!(state.floor_residual, Some((_, at)) if t_next >= at + cfg.tstep) {
+                    state.floor_residual = None;
+                }
                 let x_before = std::mem::replace(&mut x, x_primary);
                 let t_before = t;
                 fired.clear();
@@ -2516,7 +2553,7 @@ fn integrate(
             let shrunk = h * step_factor(err_ratio, step_method, false);
             stateless_reject_h = (stateful_ratio <= 1.0).then_some(h);
             if shrunk < cfg.tstep_min {
-                return Err(TransientError::TimestepUnderflow { t });
+                return Err(underflow(t, &state, cfg.newton_reltol));
             }
             h = shrunk;
         }
@@ -3178,6 +3215,83 @@ mod tests {
                 false, // branch without — a voltage source's current, which can step
             ]
         );
+    }
+
+    /// A grounded capacitor whose charge carries `delta` with a sign that flips on every Newton
+    /// iteration (`$simparam("iteration")`, read from the context). Physically it is a capacitor
+    /// with a charge error of `delta`; numerically it is what floating-point rounding does to a
+    /// solve at its floor: the iterates never settle, but they bounce by a fixed, tiny amount.
+    /// Through the companion model, the residual's bounce is `delta/h`, so it grows as the step
+    /// shrinks, as it did in 101-circuits D12/D14.
+    struct DitheredCapacitor {
+        node: [usize; 1],
+        c: f64,
+        delta: f64,
+    }
+
+    impl ModelInstance for DitheredCapacitor {
+        fn unknowns(&self) -> &[usize] {
+            &self.node
+        }
+        fn load(
+            &self,
+            x: &[f64],
+            ctx: &va_abi::AnalysisCtx,
+            _state: &mut va_abi::ModelState,
+            sink: &mut dyn va_abi::stamps::StampSink,
+        ) {
+            let n = self.node[0];
+            let sign = if (ctx.sim.iteration as u64).is_multiple_of(2) {
+                1.0
+            } else {
+                -1.0
+            };
+            sink.charge(n, self.c * x[n] + sign * self.delta);
+            sink.dcharge(n, n, self.c);
+        }
+    }
+
+    /// E060A's case (2.58.0, 101-circuits D12/D14): an underflow whose cause is a Newton
+    /// tolerance that the arithmetic cannot meet is reported as that, not as a plain underflow.
+    ///
+    /// 1 V through 1 k into 1 uF, with a 1e-15 C dither on the charge. Each step's Newton solve
+    /// bounces by about 2e-9 V, more than the default tolerance allows near 0 V and well within
+    /// the stall test, so every step size ends at the floor. Below about 1 ns the residual's
+    /// bounce (`delta/h`) passes the stall rule's 1e-6, so the stall rule cannot accept it at
+    /// the minimum step either, and the step underflows. The control: the same run without the
+    /// dither completes.
+    #[test]
+    fn an_underflow_at_the_newton_rounding_floor_is_reported_as_the_tolerance() {
+        let vs = va_abi::reference::VSource::new(0, va_abi::reference::GROUND, 2, 1.0);
+        let r = va_abi::reference::Resistor::new(0, 1, 1000.0);
+        let run_with = |delta: f64| {
+            let c = DitheredCapacitor {
+                node: [1],
+                c: 1e-6,
+                delta,
+            };
+            let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
+            let mut cfg = default_cfg(5e-3, 1e-4, Method::BackwardEuler);
+            cfg.tstep_min = 1e-12;
+            run(&insts, 3, vec![1.0, 0.0, 0.0], cfg)
+        };
+
+        match run_with(1e-15) {
+            Err(TransientError::NewtonToleranceFloor {
+                residual, reltol, ..
+            }) => {
+                assert_eq!(reltol, NEWTON_RELTOL_DEFAULT);
+                assert!(
+                    residual > 1e-12 && residual <= 1e-6,
+                    "residual {residual:e}"
+                );
+            }
+            other => panic!(
+                "expected NewtonToleranceFloor, got {:?}",
+                other.map(|w| w.t.len())
+            ),
+        }
+        assert!(run_with(0.0).is_ok(), "the control must run");
     }
 
     #[test]

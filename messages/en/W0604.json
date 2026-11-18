@@ -1,0 +1,10 @@
+{
+  "code": "W0604",
+  "rev": 1,
+  "message": "{at}: the DC operating point was found by {tier}, after the methods before it failed",
+  "description": "Plain Newton iteration did not solve this operating point, and a rescue method did (the failures are the W0603 warnings above). The answer is a true operating point of the circuit: gmin stepping ends with a solve in which the extra conductances are exactly zero. Where the circuit has several operating points (a latch, a bistable, a self-biased reference), the one found depends on the path the method took and may not be the one plain Newton would have found from a better start.",
+  "actions": [
+    "Nothing, if the operating point is the one you expect.",
+    "If the circuit has several states, choose one with `.nodeset V(<net>)=<value>` on the net that decides it."
+  ]
+}

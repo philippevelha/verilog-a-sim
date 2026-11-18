@@ -1,10 +1,10 @@
 {
  "test": "t04_oeo",
  "ok": true,
- "wall_s": 97.3,
+ "wall_s": 81.47,
  "rows": [
   {
-   "note": "td = 5.02 ns: small-signal loop gain 1.878; 281844 points, 43 s"
+   "note": "td = 5.02 ns: small-signal loop gain 1.878; 281844 points, 33 s"
   },
   {
    "what": "td 5.02 ns: oscillation frequency",
@@ -47,7 +47,7 @@
    "ok": true
   },
   {
-   "note": "td = 4.98 ns: small-signal loop gain 1.877; 277801 points, 36 s"
+   "note": "td = 4.98 ns: small-signal loop gain 1.877; 277801 points, 32 s"
   },
   {
    "what": "td 4.98 ns: oscillation frequency",

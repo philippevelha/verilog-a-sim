@@ -1,0 +1,11 @@
+{
+  "code": "W0605",
+  "rev": 1,
+  "message": "{at}: the DC operating point was found by pseudo-transient continuation, after Newton and gmin stepping failed: it is a stable state the circuit settles into from {from}",
+  "description": "Pseudo-transient continuation is the last DC rescue method. It puts a fictitious capacitor from every node to ground and lets the circuit evolve in fictitious time, from the starting point, until it stops moving; a final solve without the capacitors then gives the operating point, which is a true solution of the circuit. It succeeds where Newton and gmin stepping cannot get started: just past a fold of a circuit with hysteresis (a Schmitt trigger or a latch at its switching point), the branch the sweep was following has ended, and Newton stops at its ghost, close to a solution that no longer exists. The march falls onto the branch that remains, as the real circuit would. Each step of the march must move the way the circuit's own dynamics would, which keeps it from settling on the unstable middle solution of a bistable it starts beside; this is a strong safeguard, not a proof of stability, and an operating point unstable only as an oscillator is (a complex pair) is not detected. The fictitious capacitors are not the circuit's own, so when more than one stable state can be reached, which one is reached is not a prediction of the real circuit's transient.",
+  "actions": [
+    "In a `.dc` sweep this usually marks a switching point: the sweep has jumped from one branch to another here. Sweep the other way to see the other threshold of a hysteresis loop.",
+    "If you need to know which state the real circuit reaches, run a `.tran` with the actual source waveform.",
+    "To choose a state yourself, use `.nodeset V(<net>)=<value>`."
+  ]
+}

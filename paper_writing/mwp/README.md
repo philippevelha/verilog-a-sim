@@ -6,8 +6,9 @@ detection into the same netlist as the RF electronics around them, and eleven va
 them with closed forms. It is the component library of the paper outlined in
 `../microwavephotonics.txt` (sections 3, 4 and 6).
 
-`RESULTS.md` is the generated record of the last full run: **152 of 152 checks pass** over 12
-tests (2.55.0+3, `python tests/run_all.py`, 418 s on the development laptop; t12 is the Spectre gate).
+`RESULTS.md` is the generated record of the last full run: **158 of 158 checks pass** over 13
+tests (2.56.0+1, `python tests/run_all.py`, 346 s on the development laptop; t12 is the Spectre gate,
+which reports itself skipped where Spectre's outputs are absent).
 
 ## The formalism: envelope + carrier tag
 
@@ -159,8 +160,9 @@ sample, a pole at `fc` keeps about `1/(1 + π·fc/(2·fmax))` of its noise varia
   simulated noise density and amplitude, labelled an estimate).
 - No harmonic balance: intermodulation is a transient plus a least-squares tone fit
   (`mwp.tones`), accurate here because the nonlinear parts are memoryless.
-- The ring is a single resonance; the modulators are lumped (one pole); the photodiode has no
-  junction; the amplifier has no ASE power, no ASE–ASE beat and no chirp; the fibre has no
+- The ring is a single resonance; the modulators are lumped (one pole; `cel` gives the electrode's
+  capacitance, 2.56.0+2); the photodiode has no junction diode (`cj` gives a fixed junction
+  capacitance, 2.56.0+2); the amplifier has no ASE power, no ASE–ASE beat and no chirp; the fibre has no
   Kerr effect, no SBS, no PMD.
 - The trapezoidal rule warps a pole by (ωh)²/12: `t08` needs 160 steps per RF period for 5e-4.
 - A coupler does not check that its two inputs carry the same tag.
@@ -208,6 +210,7 @@ tests/      mwp.py            harness: run va-cli, parse, tone fit, report
             t01 … t10         one application each; writes tNN_*.json
             t11               noise in the time domain: library module against --tran-noise
             t12               verilog-a-sim against Spectre's golden outputs (golden/spectre/mwp)
+            t13               electrical loads: modulator electrode admittance, photodiode junction pole
 spectre/    Spectre netlists, run.sh, psf.py, compare_spectre.py, results notes (README)
             run_all.py        everything, then RESULTS.md
             make_figures.py   twelve figures, at least one per test, re-run from the same circuits (about 5 minutes)

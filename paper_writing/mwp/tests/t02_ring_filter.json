@@ -1,7 +1,7 @@
 {
  "test": "t02_ring_filter",
  "ok": true,
- "wall_s": 1.02,
+ "wall_s": 0.74,
  "rows": [
   {
    "what": "through spectrum, +-60 GHz: max |T - Lorentzian|",
@@ -117,7 +117,7 @@
    "ok": true
   },
   {
-   "note": "transient: 6002 points, 0.5 s"
+   "note": "transient: 6002 points, 0.4 s"
   }
  ]
 }

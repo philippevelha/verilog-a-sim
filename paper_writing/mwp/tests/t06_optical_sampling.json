@@ -1,7 +1,7 @@
 {
  "test": "t06_optical_sampling",
  "ok": true,
- "wall_s": 45.87,
+ "wall_s": 39.67,
  "rows": [
   {
    "what": "pulse charge, output 1: max |E - closed form| / E_pulse",
@@ -77,7 +77,7 @@
    "ok": true
   },
   {
-   "note": "208616 time points for 64 pulses, 8.1 s"
+   "note": "208616 time points for 64 pulses, 7.2 s"
   },
   {
    "what": "jitter 100 fs rms at 10.36 GHz: SNR vs 1/(2 pi f sigma)^2 (256 samples: +-0.6 dB statistical)",
@@ -90,7 +90,7 @@
    "ok": true
   },
   {
-   "note": "jitter-limited resolution 6.86 bit; 658646 points, 26.5 s"
+   "note": "jitter-limited resolution 6.86 bit; 658646 points, 23.1 s"
   },
   {
    "what": "channel D (even pulses): max |E - closed form| / E_pulse",
@@ -133,7 +133,7 @@
    "ok": true
   },
   {
-   "note": "112746 points, 7.3 s"
+   "note": "112746 points, 6.1 s"
   }
  ]
 }

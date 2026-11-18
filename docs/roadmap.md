@@ -1620,6 +1620,51 @@ the reference models.
 > `docs/proposals/bdf2-interface-change.md` proposes for BDF2, so the two should probably be
 > decided together rather than as two separate §6 events.
 >
+> **2026-11-18: the "blocked" premise above has expired; source stepping is still not built.**
+> Since 0.9.12 (2026-09-07) `AnalysisCtx::sim.source_scale_factor` exists in Interface β (added
+> for `$simparam("sourceScaleFactor")`), so the slot the paragraph above asked for is there and
+> no §6 event is needed for it. What is missing is everything that would use it. `va-core`
+> always passes `1.0`, and no source reads it: `va_abi::reference::VSource::load` ignores its
+> `ctx`, and so do the netlist's other independent sources. Building it means three things:
+> - a `va-core` tier that ramps the factor from 0 to 1;
+> - each independent source multiplying its value by the factor;
+> - a decision about Verilog-A modules. The LRM leaves it to the simulator whether a module
+>   that contributes a constant counts as an "independent source", and a model that reads
+>   `$simparam("sourceScaleFactor")` scales itself.
+>
+> Until then the `$simparam` answer of `1.0` stays true.
+>
+> **2026-11-18 (2.58.0): a fifth DC rescue tier, pseudo-transient continuation, and every
+> change of tier is reported.** The DC rescue in `dc::with_gmin_rescue` runs its tiers in this
+> order:
+> 1. plain Newton;
+> 2. the `gmin` ladder with node steps capped at 0.5;
+> 3. the plain `gmin` ladder;
+> 4. the `gmin` ladder with a line search;
+> 5. **new**: pseudo-transient continuation.
+>
+> How the new tier works:
+> - It adds a capacitance from every `Node` row to ground and integrates with backward Euler,
+>   as an anchored shunt `g·(x − anchor)` with `g` falling from 1e-3 toward 1e-12.
+> - It then finishes with an unshunted solve.
+> - A step is accepted only if `Σ f·Δx ≤ 0` on the node rows. Without that test, a long
+>   backward-Euler step damps the unstable mode and the march settles on an unstable root. The
+>   cubic test in `dc.rs` caught exactly this.
+>
+> What it fixed: the Schmitt trigger's saddle-node fold (101-circuits C2, ~0.5 mV past
+> 1.75152 V). Newton parked at the ghost of the ended branch, and all three `gmin` tiers parked
+> with it.
+>
+> Each failed tier is now `W0603`, a `gmin` success `W0604`, and a pseudo-transient success
+> `W0605`, wherever a DC solve runs. A `.dc` sweep gives the first 10 rescued points in full,
+> then one summary line, and if it stops it prints the points it solved before the error.
+>
+> **Limits:**
+> - The flow test is a heuristic for a non-symmetric Jacobian. An equilibrium that is unstable
+>   only through a complex pair is not detected.
+> - A cold `.op` inside a hysteresis band can still converge, by plain Newton, onto the unstable
+>   middle root. No rescue runs there, because nothing failed.
+>
 > **2026-08-31: the rung-2 gate gains a nonlinear `.dc` circuit, `circuits/diode_clamp.net`.**
 > Rung 2's existing `diode_iv.net` sweeps a source that forces the swept node directly, so
 > `V(in) = V1` identically and only the `I(V1)` column added in T6.3 exercises the diode at
@@ -1636,7 +1681,8 @@ the reference models.
 > stable.
 
 - Diode I–V; DC operating point + parameter sweep (`dc.rs`); convergence aids (`gmin`
-  stepping, source stepping, damping) in `convergence.rs`.
+  stepping, damping; pseudo-transient continuation since 2.58.0) in `convergence.rs`,
+  `newton.rs` and `dc.rs`. Source stepping is **not built** (see the 2026-11-18 note above).
 - **Validation gate (ladder rung 2):** diode I–V sweep matches golden ≤ 1e-4; convergence
   fraction tracked.
 - **Tutorial:** `t3-core/03-nonlinear-dc.qmd` — why diodes are hard, what each convergence

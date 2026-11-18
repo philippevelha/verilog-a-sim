@@ -50,6 +50,14 @@
 //    * Port dt: thermal discipline, tied to ambient internally; may be left
 //      floating or wired to other rings for thermal crosstalk.
 //
+//  NOISE (small-signal .noise, and transient with verilog-a-sim's --tran-noise):
+//    thermal noise of Rs, RSi and the heater (at its own temperature), shot
+//    noise of the junction current, and the thermodynamic fluctuation of the
+//    thermal node (4kT^2/Rth heat flow: <dT^2> = kT^2/Cth). The last is the
+//    lumped node's: Cth is the heater-scale mass, so it UNDERESTIMATES the
+//    thermo-refractive noise of the mode volume. No laser noise here (the
+//    laser model carries RIN and linewidth); no carrier-number noise.
+//
 //  NOT MODELLED: CW/CCW backscatter splitting, TPA/FCA/Kerr optical
 //    nonlinearities, wavelength dependence of Q and coefficients. Outside one
 //    resonance the response uses a periodic detuning map
@@ -154,6 +162,7 @@ module mrm_tcmt(anode, cathode, htp, htn,
     analog begin
         // ============================ electrical =============================
         I(b_rs) <+ V(b_rs) / Rs;
+        I(b_rs) <+ white_noise(4.0 * `P_K * $temperature / Rs, "rs");
         // junction limiting (standard SPICE pnjlim) - Newton convergence aid only;
         // the converged value is V(b_j) itself.
         // (arguments written from parameters only, so the model stays eligible
@@ -173,16 +182,19 @@ module mrm_tcmt(anode, cathode, htp, htn,
                      / pow(1.0 - FC, 1.0 + Mj));
         Qinj = tau_c * Id;
         I(b_j)   <+ Id + gmin_j * Vj;
+        I(b_j)   <+ white_noise(2.0 * `P_Q * abs(Id), "junction_shot");
         I(b_j)   <+ ddt(Qdep + Qinj);
         I(b_pad) <+ ddt(Cpad * V(b_pad));
         I(b_ox)  <+ ddt(Cox * V(b_ox));
         I(b_si)  <+ V(b_si) / RSi;
+        I(b_si)  <+ white_noise(4.0 * `P_K * $temperature / RSi, "rsi");
 
         // ============================== heater ===============================
         T   = Temp(b_th);
         Rh  = Rh0 * (1.0 + TCR * T);
         Vh  = V(b_h);
         I(b_h) <+ Vh / Rh;
+        I(b_h) <+ white_noise(4.0 * `P_K * ($temperature + T) / Rh, "heater");
         P_h = eta_h * Vh * Vh / Rh;
         dl_T = dlam_dT * T;                          // pm
 
@@ -257,5 +269,9 @@ module mrm_tcmt(anode, cathode, htp, htn,
         P_j   = V(b_rs) * V(b_rs) / Rs + Vj * Id;
         Pwr(b_th) <+ ddt(Cth * T);
         Pwr(b_th) <+ T / Rth - P_h - ((self_heat == 1) ? (P_abs + P_j) : 0.0);
+        // thermodynamic temperature fluctuation of the lumped node: heat-flow noise
+        // 4 k T^2 / Rth, so that <dT^2> = k T^2 / Cth
+        Pwr(b_th) <+ white_noise(4.0 * `P_K * ($temperature + T) * ($temperature + T) / Rth,
+                                 "thermal_fluct");
     end
 endmodule

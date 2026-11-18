@@ -9,9 +9,10 @@
 // envelope appears in the current. Light on another carrier tag goes to another mwp_pd wired
 // electrically in parallel (the powers add: no beat term, valid when the tag spacing is far
 // beyond the detector bandwidth).
-// Limitations: no junction (the current source does not clamp when the bias collapses), no
-// capacitance other than the single pole, saturation is a memoryless compression of the
-// optical power, no responsivity dispersion.
+// cj is the junction capacitance across a/c, the load a transimpedance amplifier sees.
+// Limitations: no junction diode (the current source does not clamp when the bias collapses),
+// cj is bias-independent, saturation is a memoryless compression of the optical power, no
+// responsivity dispersion.
 `include "disciplines.vams"
 `include "mwp.vams"
 module mwp_pd(i_re, i_im, a, c);
@@ -23,6 +24,7 @@ module mwp_pd(i_re, i_im, a, c);
     parameter real f3db  = 0.0   from [0:inf);         // bandwidth, Hz (0: unlimited)
     parameter real psat  = 0.0   from [0:inf);         // saturation power, mW (0: none)
     parameter real idark = 0.0   from [0:inf);         // dark current, A
+    parameter real cj    = 0.0   from [0:inf);         // junction capacitance, F (0: none)
     real p, pe, tau, iph;
     analog begin
         tau = (f3db > 0.0) ? 1.0 / (`MWP_TWOPI * f3db) : 0.0;
@@ -33,5 +35,6 @@ module mwp_pd(i_re, i_im, a, c);
         iph = resp * 1e-3 * V(px);
         I(c, a) <+ iph + idark;
         I(c, a) <+ white_noise(2.0 * `MWP_Q * (abs(iph) + idark), "shot");
+        I(a, c) <+ ddt(cj * V(a, c));
     end
 endmodule

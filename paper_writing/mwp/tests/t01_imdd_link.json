@@ -1,7 +1,7 @@
 {
  "test": "t01_imdd_link",
  "ok": true,
- "wall_s": 2.53,
+ "wall_s": 1.84,
  "rows": [
   {
    "what": "DC transfer, ER ideal: max |i - closed form| / i_max",
@@ -157,7 +157,7 @@
    "ok": true
   },
   {
-   "note": "IIP3 = 21.11 dBm into 50 ohm; transient 10001 points in 0.7 s"
+   "note": "IIP3 = 21.11 dBm into 50 ohm; transient 10001 points in 0.5 s"
   },
   {
    "what": "output noise PSD (shot + RIN + load thermal)",

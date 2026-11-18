@@ -1,4 +1,5 @@
-"""IHP SG13G2 thick-oxide (3.3 V) MOS devices as flat `.model` cards for va-cli.
+"""IHP SG13G2 MOS devices as flat `.model` cards for va-cli: thick-oxide 3.3 V (`hv`, the default)
+and core 1.2 V (`lv`, since 2.56.0+2).
 
 The IHP Open PDK (https://github.com/IHP-GmbH/IHP-Open-PDK, Apache-2.0) ships its MOS models as
 ngspice libraries: a `.subckt sg13_hv_nmos d g s b` wrapper with geometry parameters and
@@ -44,9 +45,9 @@ def _psp_params():
     return names
 
 
-def _corner(pdk, corner):
+def _corner(pdk, corner, flavour="hv"):
     vals = {}
-    path = os.path.join(pdk, MODELS, "cornerMOShv.lib")
+    path = os.path.join(pdk, MODELS, f"cornerMOS{flavour}.lib")
     inside = False
     with open(path) as fh:
         for line in fh:
@@ -63,9 +64,9 @@ def _corner(pdk, corner):
     return vals
 
 
-def _raw_card(pdk, name):
+def _raw_card(pdk, name, flavour="hv"):
     """The `key = value` pairs of `.model <name>`, values as written (quoted or not)."""
-    path = os.path.join(pdk, MODELS, "sg13g2_moshv_parm.lib")
+    path = os.path.join(pdk, MODELS, f"sg13g2_mos{flavour}_parm.lib")
     with open(path) as fh:
         text = fh.read()
     m = re.search(r"^\.model\s+" + name + r"\s+\S+(.*?)(?=^\s*$|^\.model)", text, re.M | re.S)
@@ -82,17 +83,20 @@ def _eval(expr, env):
     return float(eval(expr, {"__builtins__": {}, "max": max, "min": min}, env))
 
 
-def card(kind, w, l, ng=1, corner="mos_tt", pdk=DEFAULT_PDK):
-    """(model name, card text, instance-parameter string) for one sg13_hv_<kind> geometry.
+def card(kind, w, l, ng=1, corner="mos_tt", pdk=DEFAULT_PDK, flavour="hv"):
+    """(model name, card text, instance-parameter string) for one sg13_<flavour>_<kind> geometry.
 
-    `kind` is "nmos" or "pmos"; `w`, `l` in metres (total width, as the PDK's `w`)."""
+    `kind` is "nmos" or "pmos"; `flavour` "hv" (3.3 V) or "lv" (1.2 V core); `w`, `l` in metres
+    (total width, as the PDK's `w`). The two wrappers share the geometry constants Z1, Z2, WMIN."""
     if kind not in ("nmos", "pmos"):
         raise ValueError(kind)
-    env = dict(_corner(pdk, corner))
+    if flavour not in ("hv", "lv"):
+        raise ValueError(flavour)
+    env = dict(_corner(pdk, corner, flavour))
     env.update(w=w, l=l, ng=ng, pre_layout=1, rfmode=0, swsoa=0.0)
     known = _psp_params()
     params = []
-    for k, v in _raw_card(pdk, f"sg13g2_hv_{kind}_psp"):
+    for k, v in _raw_card(pdk, f"sg13g2_{flavour}_{kind}_psp", flavour):
         k = k.lower()
         if k == "level" or k not in known:
             continue
@@ -106,7 +110,7 @@ def card(kind, w, l, ng=1, corner="mos_tt", pdk=DEFAULT_PDK):
         ad = wf * Z2 / 2 * ng
         ps = 2 * (wf * (2 + max(ng - 2, 0) / 2) + 2 * Z1 + max(ng - 2, 0) / 2 * Z2)
         pd = (wf + Z2) * ng
-    name = f"hv{kind[0]}_w{w * 1e9:.0f}n_l{l * 1e9:.0f}n_ng{ng}"
+    name = f"{flavour}{kind[0]}_w{w * 1e9:.0f}n_l{l * 1e9:.0f}n_ng{ng}"
     lines = [f".model {name} PSP103VA"]
     lines += [f"+ {k}={v:.10g}" for k, v in params]
     inst = (f"w={w:.6g} l={l:.6g} nf={ng} mult=1 as={as_:.6g} ad={ad:.6g} ps={ps:.6g} "

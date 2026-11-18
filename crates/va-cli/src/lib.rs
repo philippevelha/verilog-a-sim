@@ -59,7 +59,71 @@ fn newton_cfg(solver: Solver) -> NewtonConfig {
         btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         log_full: LOG_FULL.load(std::sync::atomic::Ordering::Relaxed),
         log_counters: Some(codegen_counts),
+        on_rescue: Some(queue_rescue),
         ..NewtonConfig::default()
+    }
+}
+
+/// What a standalone operating point starts from, for `W0605`'s `{from}`.
+const START_OF_OP: &str = "its starting point (0 everywhere, or the `.nodeset` values)";
+
+/// The DC rescue's tier changes since the last [`report_rescues`], in order (2.58.0).
+/// `va-core` reports them through [`NewtonConfig::on_rescue`] as they happen but does not know
+/// what is being solved; the call site that does (a `.dc` point, the `.tran` seed) prints them.
+static RESCUES: std::sync::Mutex<Vec<va_core::dc::RescueEvent>> = std::sync::Mutex::new(Vec::new());
+
+/// [`NewtonConfig::on_rescue`] for every solve `va-cli` runs: queue the event for
+/// [`report_rescues`].
+fn queue_rescue(e: va_core::dc::RescueEvent) {
+    if let Ok(mut q) = RESCUES.lock() {
+        q.push(e);
+    }
+}
+
+/// Take the queued rescue events.
+fn take_rescues() -> Vec<va_core::dc::RescueEvent> {
+    RESCUES
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
+}
+
+/// Print the queued rescue events as warnings, `at` naming the solve they belong to: `W0603`
+/// for each method that failed and the one tried next, then `W0604` (a `gmin` tier solved it)
+/// or `W0605` (pseudo-transient continuation did, `from` naming its starting point). Returns
+/// how many events there were, so a caller can tell whether the solve needed any rescue.
+fn report_rescues(at: &str, from: &str) -> usize {
+    let events = take_rescues();
+    for e in &events {
+        eprintln!("[va-cli] {}", rescue_diagnostic(e, at, from));
+    }
+    events.len()
+}
+
+/// One rescue event as its warning (§ [`report_rescues`]).
+fn rescue_diagnostic(e: &va_core::dc::RescueEvent, at: &str, from: &str) -> va_diag::Diagnostic {
+    use va_core::dc::{RescueEvent, Tier};
+    match e {
+        RescueEvent::Failed { tier, reason, next } => {
+            va_diag::Diagnostic::new(va_diag::codes::W0603)
+                .arg("at", at)
+                .arg("tier", tier.describe())
+                .arg("reason", reason)
+                .arg(
+                    "next",
+                    next.map_or("nothing: every method has failed".to_string(), |t| {
+                        t.describe().to_string()
+                    }),
+                )
+        }
+        RescueEvent::Solved {
+            tier: Tier::PseudoTransient,
+        } => va_diag::Diagnostic::new(va_diag::codes::W0605)
+            .arg("at", at)
+            .arg("from", from),
+        RescueEvent::Solved { tier } => va_diag::Diagnostic::new(va_diag::codes::W0604)
+            .arg("at", at)
+            .arg("tier", tier.describe()),
     }
 }
 
@@ -1021,9 +1085,21 @@ pub fn run_sim(
             eprintln!("[va-cli] wrote noise plot to {path}");
         }
     } else if let Some(sweep) = &net.dc {
-        let points = solve_dc_sweep_impl(&net, &compiled, sweep, solver, Some(built))?;
+        let SweepOutcome { points, error } =
+            solve_dc_sweep_impl(&net, &compiled, sweep, solver, Some(built))?;
         let shown = select_quantities(&all_quantities, report_only)?;
         report_sweep(&shown, sweep, &points);
+        // The points before a failure are printed first (2.58.0), then the error: a sweep that
+        // stops at a fold has still answered every point up to it.
+        if let Some(e) = error {
+            if !points.is_empty() {
+                eprintln!(
+                    "[va-cli] the `.dc` sweep stopped after {} point(s); those are printed above",
+                    points.len()
+                );
+            }
+            return Err(e);
+        }
         if let Some(path) = plot {
             plot::plot_sweep(path, &shown, sweep, &points).map_err(|e| {
                 va_diag::Diagnostic::new(va_diag::codes::E0708)
@@ -2068,7 +2144,9 @@ fn solve_dc_impl(
     // Events-aware: `above` fires in a static solve when its expression is already past the
     // threshold, and the body it guards changes the equations (§ `@(above)`).
     let holds = nodeset_holds(net, dim)?;
-    let op = operating_point_nodeset(&refs, dim, newton_cfg(solver), &holds)
+    let solved = operating_point_nodeset(&refs, dim, newton_cfg(solver), &holds);
+    report_rescues("the operating point", START_OF_OP);
+    let op = solved
         .map(|(op, _)| op)
         .map_err(|e| name_non_finite_row(e.into(), &quantities))
         .context("DC operating-point solve failed")?;
@@ -2221,7 +2299,12 @@ fn operating_point_nodeset(
     }
     let mut held: Vec<&dyn ModelInstance> = refs.to_vec();
     held.extend(holds.iter().map(|h| h as &dyn ModelInstance));
-    let from = match va_core::dc::operating_point_continued(&held, dim, cfg, None, Some(&start)) {
+    let phase1 = va_core::dc::operating_point_continued(&held, dim, cfg, None, Some(&start));
+    report_rescues(
+        "the `.nodeset` pre-solve (nodeset nets held)",
+        "the `.nodeset` values",
+    );
+    let from = match phase1 {
         Ok((op, _)) => op.x,
         Err(e) => {
             eprintln!(
@@ -2320,6 +2403,14 @@ pub fn numerical_diagnostic(e: &(dyn std::error::Error + 'static)) -> Option<va_
             T::TimestepUnderflow { t } => {
                 Diagnostic::new(codes::E0605).arg("time", format!("{t:e}"))
             }
+            T::NewtonToleranceFloor {
+                t,
+                residual,
+                reltol,
+            } => Diagnostic::new(codes::E060A)
+                .arg("time", format!("{t:e}"))
+                .arg("residual", format!("{residual:.1e}"))
+                .arg("reltol", format!("{reltol:e}")),
             T::Stalled {
                 t,
                 h,
@@ -2437,7 +2528,7 @@ pub fn solve_dc_sweep_with(
     sweep: &va_netlist::DcSweep,
     solver: Solver,
 ) -> Result<Vec<(f64, va_core::dc::OperatingPoint)>> {
-    solve_dc_sweep_impl(net, compiled, sweep, solver, None)
+    solve_dc_sweep_impl(net, compiled, sweep, solver, None)?.into_result()
 }
 
 /// [`solve_dc_sweep_with`], on the circuit `prebuilt` already holds when given one (`run_sim`
@@ -2448,7 +2539,7 @@ fn solve_dc_sweep_impl(
     sweep: &va_netlist::DcSweep,
     solver: Solver,
     prebuilt: Option<BuiltInstances>,
-) -> Result<Vec<(f64, va_core::dc::OperatingPoint)>> {
+) -> Result<SweepOutcome> {
     let src = net
         .devices
         .iter()
@@ -2483,106 +2574,226 @@ fn solve_dc_sweep_impl(
     let mut swept_device = src.clone();
 
     let mut out = Vec::with_capacity(points.len());
-    // The previous point's solution, handed to the next as its starting guess (§ continuation
-    // below). `None` for the first point, which has nothing to continue from.
-    let mut previous: Option<Vec<f64>> = None;
-    // The previous point's `above`-site values, so each point can ask whether its sites crossed
-    // *since the last point* rather than whether they are merely positive now (§ events below).
-    // `None` for the first point, which is the initialization case the LRM describes.
-    let mut previous_above: Option<va_core::dc::AboveValues> = None;
-    for value in points {
-        swept_device.value = Some(value);
-        let mut next_unknown = unknown_before;
-        // Per point, deliberately. The swept value is part of the cache key — it has to be,
-        // since it is a parameter the compiled model bakes in — so nothing could be shared
-        // across points anyway, and a cache hoisted out of this loop would only accumulate one
-        // dead entry per point. A source's module is small; the sweep's real cost saving is
-        // that the *other* devices are not rebuilt at all.
-        let mut cache = CompiledCache::at(deck_temp_k(net));
-        // A fresh forest is exact here only because the swept device is a `vsource` (checked
-        // above), a primitive with no ideal shorts for the forest to decide about.
-        let mut shorts = ShortForest::default();
-        let (instance, _, _) = build_instance(
-            &swept_device,
-            compiled,
-            &mut next_unknown,
-            &mut cache,
-            &mut shorts,
-        )
-        .with_context(|| format!("rebuilding `{}` at {value}", sweep.source))?;
-        // A device that claimed a different number of unknowns on the rebuild would push every
-        // later device's rows out of alignment, and the solve would quietly be of a different
-        // circuit. It cannot happen for a source — its row count does not depend on its value —
-        // which is exactly why it is worth saying so out loud rather than assuming it.
-        if next_unknown != unknown_after {
-            return Err(va_diag::Diagnostic::new(va_diag::codes::E0001)
-                .arg(
-                    "detail",
-                    format!(
+    let mut rescued = SweepRescues::default();
+    // Every point that converged is kept when a later one fails (2.58.0), and returned with the
+    // error, so the caller can print them before it: a sweep that stops at its 900th point has
+    // still computed 899, and the last of them are what show where it went wrong.
+    let error = (|| -> Result<()> {
+        // The previous point's solution, handed to the next as its starting guess (§ continuation
+        // below). `None` for the first point, which has nothing to continue from.
+        let mut previous: Option<Vec<f64>> = None;
+        // The previous point's `above`-site values, so each point can ask whether its sites crossed
+        // *since the last point* rather than whether they are merely positive now (§ events below).
+        // `None` for the first point, which is the initialization case the LRM describes.
+        let mut previous_above: Option<va_core::dc::AboveValues> = None;
+        for value in points {
+            swept_device.value = Some(value);
+            let mut next_unknown = unknown_before;
+            // Per point, deliberately. The swept value is part of the cache key — it has to be,
+            // since it is a parameter the compiled model bakes in — so nothing could be shared
+            // across points anyway, and a cache hoisted out of this loop would only accumulate one
+            // dead entry per point. A source's module is small; the sweep's real cost saving is
+            // that the *other* devices are not rebuilt at all.
+            let mut cache = CompiledCache::at(deck_temp_k(net));
+            // A fresh forest is exact here only because the swept device is a `vsource` (checked
+            // above), a primitive with no ideal shorts for the forest to decide about.
+            let mut shorts = ShortForest::default();
+            let (instance, _, _) = build_instance(
+                &swept_device,
+                compiled,
+                &mut next_unknown,
+                &mut cache,
+                &mut shorts,
+            )
+            .with_context(|| format!("rebuilding `{}` at {value}", sweep.source))?;
+            // A device that claimed a different number of unknowns on the rebuild would push every
+            // later device's rows out of alignment, and the solve would quietly be of a different
+            // circuit. It cannot happen for a source — its row count does not depend on its value —
+            // which is exactly why it is worth saying so out loud rather than assuming it.
+            if next_unknown != unknown_after {
+                return Err(va_diag::Diagnostic::new(va_diag::codes::E0001)
+                    .arg(
+                        "detail",
+                        format!(
                         "`{}` claimed {} unknown(s) when first built and {} on rebuild at {value}",
                         sweep.source,
                         unknown_after - unknown_before,
                         next_unknown - unknown_before
                     ),
-                )
-                .into());
-        }
-        built.instances[slot_index] = instance;
+                    )
+                    .into());
+            }
+            built.instances[slot_index] = instance;
 
-        let refs: Vec<&dyn ModelInstance> = built.instances.iter().map(|b| b.as_ref()).collect();
-        // Continuation: start Newton at the previous point's answer rather than at the origin.
-        // Adjacent points of a sweep are the same circuit at a slightly different source value,
-        // so the previous solution is usually within a couple of iterations of this one, where
-        // the origin is a dozen or more — and for a strongly nonlinear device it is the
-        // difference between converging and not.
-        //
-        // **On failure the point is retried cold.** Continuation is an accelerator, not a
-        // change of contract: a guess can in principle be worse than the origin (a fold in the
-        // I-V curve, a point the sweep steps across too coarsely), and a sweep that used to
-        // produce an answer must not stop producing one because the solver was handed a hint.
-        // With the retry, the set of points that converge can only grow.
-        //
-        // `previous_above` is what makes `@(above(...))` mean what the LRM says it means across
-        // a sweep. An `above` fires on its expression going from non-positive to positive; with
-        // no history to compare against, every point can only ask "is it positive *now*", so a
-        // signal that went past its threshold at the third point re-fired at the fourth, fifth
-        // and every point after — a latch that never latches. `va-core` has taken the previous
-        // point's site values for exactly this since the event channel was built
-        // (`dc::operating_point_with_events`'s `previous`); the sweep simply never threaded
-        // them, and passed `None` every time.
-        //
-        // It is *not* reset when a warm start fails and the point is retried cold: which sites
-        // crossed is a property of the two operating points, not of the path Newton took to the
-        // second one.
-        let prev_above = previous_above.take();
-        let solve = |start: Option<&[f64]>| {
-            va_core::dc::operating_point_continued(
-                &refs,
-                built.dim,
-                newton_cfg(solver),
-                prev_above.as_ref(),
-                start,
-            )
-        };
-        let solved = match previous.as_deref() {
-            Some(warm) => solve(Some(warm)).or_else(|_| solve(None)),
-            None => solve(None),
-        };
-        let (op, above) = solved
-            .map_err(|e| name_non_finite_row(e.into(), &built.quantities))
-            .context("DC operating-point solve failed")
-            .with_context(|| format!("`.dc` sweep at {}={value}", sweep.source))?;
-        previous = Some(op.x.clone());
-        previous_above = Some(above);
-        let when = format!("{}={value}", sweep.source);
-        let finish = static_point_tasks(&refs, &op.x, built.dim, &when)?;
-        out.push((value, op));
-        // `$finish` ends the sweep after the point it was called at (LRM §9.7.1).
-        if finish.is_some() {
-            break;
+            let refs: Vec<&dyn ModelInstance> =
+                built.instances.iter().map(|b| b.as_ref()).collect();
+            // Continuation: start Newton at the previous point's answer rather than at the origin.
+            // Adjacent points of a sweep are the same circuit at a slightly different source value,
+            // so the previous solution is usually within a couple of iterations of this one, where
+            // the origin is a dozen or more — and for a strongly nonlinear device it is the
+            // difference between converging and not.
+            //
+            // **On failure the point is retried cold.** Continuation is an accelerator, not a
+            // change of contract: a guess can in principle be worse than the origin (a fold in the
+            // I-V curve, a point the sweep steps across too coarsely), and a sweep that used to
+            // produce an answer must not stop producing one because the solver was handed a hint.
+            // With the retry, the set of points that converge can only grow.
+            //
+            // `previous_above` is what makes `@(above(...))` mean what the LRM says it means across
+            // a sweep. An `above` fires on its expression going from non-positive to positive; with
+            // no history to compare against, every point can only ask "is it positive *now*", so a
+            // signal that went past its threshold at the third point re-fired at the fourth, fifth
+            // and every point after — a latch that never latches. `va-core` has taken the previous
+            // point's site values for exactly this since the event channel was built
+            // (`dc::operating_point_with_events`'s `previous`); the sweep simply never threaded
+            // them, and passed `None` every time.
+            //
+            // It is *not* reset when a warm start fails and the point is retried cold: which sites
+            // crossed is a property of the two operating points, not of the path Newton took to the
+            // second one.
+            let prev_above = previous_above.take();
+            let solve = |start: Option<&[f64]>| {
+                va_core::dc::operating_point_continued(
+                    &refs,
+                    built.dim,
+                    newton_cfg(solver),
+                    prev_above.as_ref(),
+                    start,
+                )
+            };
+            let at = format!("`.dc` at {}={value}", sweep.source);
+            let solved = match previous.as_deref() {
+                Some(warm) => match solve(Some(warm)) {
+                    Ok(ok) => {
+                        rescued.report(&at, "the previous sweep point's answer");
+                        Ok(ok)
+                    }
+                    Err(e) => {
+                        rescued.report(&at, "the previous sweep point's answer");
+                        rescued.restart(&at, &e);
+                        let cold = solve(None);
+                        rescued.report(&at, "zero (0 everywhere)");
+                        cold
+                    }
+                },
+                None => {
+                    let first = solve(None);
+                    rescued.report(&at, "zero (0 everywhere)");
+                    first
+                }
+            };
+            let (op, above) = solved
+                .map_err(|e| name_non_finite_row(e.into(), &built.quantities))
+                .context("DC operating-point solve failed")
+                .with_context(|| format!("`.dc` sweep at {}={value}", sweep.source))?;
+            previous = Some(op.x.clone());
+            previous_above = Some(above);
+            let when = format!("{}={value}", sweep.source);
+            let finish = static_point_tasks(&refs, &op.x, built.dim, &when)?;
+            out.push((value, op));
+            // `$finish` ends the sweep after the point it was called at (LRM §9.7.1).
+            if finish.is_some() {
+                break;
+            }
+        }
+        Ok(())
+    })()
+    .err();
+    rescued.summary();
+    Ok(SweepOutcome { points: out, error })
+}
+
+/// A `.dc` sweep's result: every point that converged, in order, and the error that stopped it
+/// early, if one did (`points` then holds the points before it).
+struct SweepOutcome {
+    points: Vec<(f64, va_core::dc::OperatingPoint)>,
+    error: Option<anyhow::Error>,
+}
+
+impl SweepOutcome {
+    /// The whole sweep or its error, for a caller with no use for a partial one.
+    fn into_result(self) -> Result<Vec<(f64, va_core::dc::OperatingPoint)>> {
+        match self.error {
+            Some(e) => Err(e),
+            None => Ok(self.points),
         }
     }
-    Ok(out)
+}
+
+/// How many sweep points have their DC-rescue warnings printed in full; later points that
+/// needed the rescue are counted and summarized at the end, so a sweep through a region where
+/// every point needs it (thousands of points) does not bury its result.
+const SWEEP_RESCUE_POINTS_SHOWN: usize = 10;
+
+/// The DC-rescue warnings of one `.dc` sweep (§ [`report_rescues`]), with the cap above.
+#[derive(Default)]
+struct SweepRescues {
+    /// Points whose warnings were printed.
+    shown: usize,
+    /// Points past the cap that needed the rescue, by the method that solved them (or
+    /// "failed").
+    hidden: std::collections::BTreeMap<&'static str, usize>,
+}
+
+impl SweepRescues {
+    /// Print (or count) the rescue events queued for the point `at`, whose solve started from
+    /// `from`.
+    fn report(&mut self, at: &str, from: &str) {
+        let events = take_rescues();
+        if events.is_empty() {
+            return;
+        }
+        if self.shown < SWEEP_RESCUE_POINTS_SHOWN {
+            self.shown += 1;
+            for e in &events {
+                eprintln!("[va-cli] {}", rescue_diagnostic(e, at, from));
+            }
+        } else {
+            let solved_by = events.iter().find_map(|e| match e {
+                va_core::dc::RescueEvent::Solved { tier } => Some(tier.describe()),
+                va_core::dc::RescueEvent::Failed { .. } => None,
+            });
+            *self
+                .hidden
+                .entry(solved_by.unwrap_or("failed"))
+                .or_default() += 1;
+        }
+    }
+
+    /// Say that the point `at`, started from the previous point's answer, failed with every
+    /// method and is being solved again from zero — a change of method like any other.
+    fn restart(&mut self, at: &str, e: &va_core::CoreError) {
+        if self.shown <= SWEEP_RESCUE_POINTS_SHOWN {
+            eprintln!(
+                "[va-cli] {}",
+                va_diag::Diagnostic::new(va_diag::codes::W0603)
+                    .arg("at", at)
+                    .arg(
+                        "tier",
+                        "every method, started from the previous sweep point's answer,"
+                    )
+                    .arg("reason", e)
+                    .arg("next", "every method again, started from zero")
+            );
+        }
+    }
+
+    /// The closing count of points whose warnings were not printed.
+    fn summary(&self) {
+        let n: usize = self.hidden.values().sum();
+        if n == 0 {
+            return;
+        }
+        let by = self
+            .hidden
+            .iter()
+            .map(|(k, v)| format!("{v} by {k}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "[va-cli] note: {n} more sweep point(s) needed the DC rescue ({by}); their W0603-W0605              warnings are not printed after the first {SWEEP_RESCUE_POINTS_SHOWN} points that needed it"
+        );
+    }
 }
 
 /// Generate the swept values `start, start+step, …` up to and including `stop` (within half a
@@ -2980,6 +3191,33 @@ fn solve_transient_impl(
         ..
     } = prebuilt_or_build(prebuilt, net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
+    // Transient noise (2.55.0): every instance is wrapped so that its noise sources inject their
+    // currents in the transient. The operating point below is solved on the plain instances,
+    // without noise; the wrapper ramps every source in over the first sample (2.57.0,
+    // `va_transient::noise`, "The start of a run").
+    let ncfg = tran_noise().map(|ncfg| {
+        // Flicker sources (2.57.0) are generated down to `--tran-noise-fmin`, by default
+        // 1/(run length): below it a run cannot tell a flicker source from a constant.
+        let span = cfg.tstop - cfg.tstart;
+        va_transient::noise::TranNoiseConfig {
+            flicker_fmin: ncfg.flicker_fmin.or((span > 0.0).then(|| 1.0 / span)),
+            ..ncfg
+        }
+    });
+    let noisy: Vec<va_transient::noise::WithTranNoise> = match ncfg {
+        Some(ncfg) => refs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| va_transient::noise::WithTranNoise::new(*r, i as u64, ncfg))
+            .collect(),
+        None => Vec::new(),
+    };
+    let plain = refs;
+    let refs: Vec<&dyn ModelInstance> = if noisy.is_empty() {
+        plain.clone()
+    } else {
+        noisy.iter().map(|n| n as &dyn ModelInstance).collect()
+    };
     // Where the integration starts, and it is not a detail. SPICE solves the DC operating
     // point first and integrates from there unless the deck says `UIC`; this project did the
     // opposite unconditionally until v1.2.4, and `xtask gen-golden` carried a matching
@@ -3004,7 +3242,9 @@ fn solve_transient_impl(
             transient_seed: true,
             ..newton_cfg(solver)
         };
-        let (op, _) = operating_point_ic(&refs, dim, seed_cfg, &holds, &ics)
+        let solved = operating_point_ic(&plain, dim, seed_cfg, &holds, &ics);
+        report_rescues("the operating point that starts the transient", START_OF_OP);
+        let (op, _) = solved
             .map_err(|e| name_non_finite_row(e.into(), &quantities))
             .context(
                 "the operating-point solve that precedes a transient run failed; add `UIC` \
@@ -3014,33 +3254,28 @@ fn solve_transient_impl(
         op.x
     };
 
-    // Transient noise (2.55.0): the operating point above is solved without it; from here on
-    // every instance is wrapped so that its white sources inject their currents.
-    let noisy: Vec<va_transient::noise::WithTranNoise> = match tran_noise() {
-        Some(ncfg) => {
-            let left_out = va_transient::noise::excluded_sources(
-                &refs,
-                &x0,
-                &va_abi::AnalysisCtx::transient(0.0),
-            );
-            if !left_out.is_empty() {
-                let diag = va_diag::Diagnostic::new(va_diag::codes::W0602)
-                    .arg("sources", left_out.iter().map(|&(_, n)| n).sum::<usize>())
-                    .arg("devices", left_out.len());
-                eprintln!("[va-cli] {diag}");
-            }
-            refs.iter()
-                .enumerate()
-                .map(|(i, r)| va_transient::noise::WithTranNoise::new(*r, i as u64, ncfg))
-                .collect()
+    if let Some(ncfg) = ncfg {
+        match ncfg.flicker_fmin.filter(|&f| f < 0.25 * ncfg.fmax) {
+            Some(f) => println!(
+                "[va-cli] transient noise: flicker sources from {f:.3e} to {:.3e} Hz ({} bands per decade)",
+                0.25 * ncfg.fmax,
+                va_transient::noise::FLICKER_BANDS_PER_DECADE
+            ),
+            None => println!("[va-cli] transient noise: no flicker band (fmin at or above fmax/4)"),
         }
-        None => Vec::new(),
-    };
-    let refs: Vec<&dyn ModelInstance> = if noisy.is_empty() {
-        refs
-    } else {
-        noisy.iter().map(|n| n as &dyn ModelInstance).collect()
-    };
+        let left_out = va_transient::noise::excluded_sources(
+            &plain,
+            &x0,
+            &va_abi::AnalysisCtx::transient(0.0),
+            &ncfg,
+        );
+        if !left_out.is_empty() {
+            let diag = va_diag::Diagnostic::new(va_diag::codes::W0602)
+                .arg("sources", left_out.iter().map(|&(_, n)| n).sum::<usize>())
+                .arg("devices", left_out.len());
+            eprintln!("[va-cli] {diag}");
+        }
+    }
 
     let events = va_transient::events::EventQueue::new();
     match keep {
@@ -3249,8 +3484,9 @@ fn solve_ac_impl(
         ..
     } = prebuilt_or_build(prebuilt, net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
-    let op = operating_point(&refs, dim, newton_cfg(solver))
-        .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
+    let solved = operating_point(&refs, dim, newton_cfg(solver));
+    report_rescues("the operating point `.ac` linearizes about", START_OF_OP);
+    let op = solved.context("DC operating-point solve failed (AC analysis linearizes about it)")?;
     if static_point_tasks(&refs, &op.x, dim, "the operating point")?.is_some() {
         return Err(va_diag::Diagnostic::new(va_diag::codes::E0721)
             .arg("card", "ac")
@@ -3456,8 +3692,10 @@ fn solve_noise_impl(
     }
 
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
-    let op = operating_point(&refs, dim, newton_cfg(solver))
-        .context("DC operating-point solve failed (noise analysis linearizes about it)")?;
+    let solved = operating_point(&refs, dim, newton_cfg(solver));
+    report_rescues("the operating point `.noise` linearizes about", START_OF_OP);
+    let op =
+        solved.context("DC operating-point solve failed (noise analysis linearizes about it)")?;
     if static_point_tasks(&refs, &op.x, dim, "the operating point")?.is_some() {
         return Err(va_diag::Diagnostic::new(va_diag::codes::E0721)
             .arg("card", "noise")
@@ -4690,6 +4928,50 @@ fn report_transient(quantities: &[Quantity], wf: &Waveform) -> std::io::Result<(
 mod tests {
     use super::*;
     use va_abi::reference::GROUND;
+
+    /// Every rescue event renders as its own warning with every placeholder filled: a failed
+    /// method with the next one (or none left), a `gmin` tier that solved, and the
+    /// pseudo-transient march that solved with its note about stable states.
+    #[test]
+    fn every_rescue_event_renders_as_a_filled_warning() {
+        use va_core::dc::{RescueEvent, Tier};
+        // The one-line form, as `va-cli` prints it.
+        let render = |e: RescueEvent| {
+            rescue_diagnostic(&e, "`.dc` at VIN=1.75", "the previous point").to_string()
+        };
+        let failed = render(RescueEvent::Failed {
+            tier: Tier::Plain,
+            reason: "no convergence".into(),
+            next: Some(Tier::CappedLadder),
+        });
+        assert!(failed.contains("warning[W0603]"), "{failed}");
+        assert!(
+            failed.contains("`.dc` at VIN=1.75: Newton did not find the DC operating point (no convergence); trying gmin stepping with node steps capped at 0.5"),
+            "{failed}"
+        );
+        let last = render(RescueEvent::Failed {
+            tier: Tier::PseudoTransient,
+            reason: "x".into(),
+            next: None,
+        });
+        assert!(last.contains("every method has failed"), "{last}");
+        let ladder = render(RescueEvent::Solved { tier: Tier::Ladder });
+        assert!(
+            ladder.contains("warning[W0604]") && ladder.contains("by gmin stepping,"),
+            "{ladder}"
+        );
+        let march = render(RescueEvent::Solved {
+            tier: Tier::PseudoTransient,
+        });
+        assert!(march.contains("warning[W0605]"), "{march}");
+        assert!(
+            march.contains("settles into from the previous point"),
+            "{march}"
+        );
+        for s in [failed, last, ladder, march] {
+            assert!(!s.contains('{'), "an unfilled placeholder: {s}");
+        }
+    }
 
     /// `W0601`'s trigger (`quiet_from`): a waveform that goes flat early and stays flat is
     /// reported from where it went flat; one still moving at the end, or flat only for its last
@@ -8826,6 +9108,14 @@ endmodule
                 "E0604",
             ),
             (Box::new(T::TimestepUnderflow { t: 1e-6 }), "E0605"),
+            (
+                Box::new(T::NewtonToleranceFloor {
+                    t: 1e-6,
+                    residual: 1.6e-11,
+                    reltol: 1e-9,
+                }),
+                "E060A",
+            ),
             (
                 Box::new(T::Stalled {
                     t: 1e-6,
